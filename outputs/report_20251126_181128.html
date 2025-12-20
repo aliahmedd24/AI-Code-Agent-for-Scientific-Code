@@ -1,0 +1,594 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scientific Code Analysis Report</title>
+    <style>
+        :root {
+            --bg-primary: #0f0f1a;
+            --bg-secondary: #1a1a2e;
+            --bg-tertiary: #252540;
+            --text-primary: #e8e8f0;
+            --text-secondary: #a0a0b8;
+            --accent: #6366f1;
+            --accent-light: #818cf8;
+            --success: #10b981;
+            --error: #ef4444;
+            --warning: #f59e0b;
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        header {
+            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary));
+            padding: 3rem 2rem;
+            border-radius: 16px;
+            margin-bottom: 2rem;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, var(--accent-light), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+        
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .card {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .card h2 {
+            font-size: 1.25rem;
+            color: var(--accent-light);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .card h2::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+        
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+        
+        .stat {
+            background: var(--bg-tertiary);
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 1.75rem;
+            font-weight: bold;
+            color: var(--accent-light);
+        }
+        
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        .code-block {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.9rem;
+            border: 1px solid rgba(255,255,255,0.1);
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .success { color: var(--success); }
+        .error { color: var(--error); }
+        .warning { color: var(--warning); }
+        
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--success); }
+        .badge-error { background: rgba(239, 68, 68, 0.2); color: var(--error); }
+        
+        .timeline {
+            position: relative;
+            padding-left: 2rem;
+        }
+        
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--bg-tertiary);
+        }
+        
+        .timeline-item {
+            position: relative;
+            padding-bottom: 1.5rem;
+        }
+        
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -2rem;
+            top: 0.5rem;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--accent);
+            border: 2px solid var(--bg-primary);
+        }
+        
+        .timeline-item.error::before {
+            background: var(--error);
+        }
+        
+        .mapping-item {
+            background: var(--bg-tertiary);
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 0.75rem;
+        }
+        
+        .mapping-arrow {
+            color: var(--accent);
+            margin: 0 0.5rem;
+        }
+        
+        .viz-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+        
+        .viz-item {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .viz-item img {
+            width: 100%;
+            height: auto;
+        }
+        
+        .section-title {
+            font-size: 1.75rem;
+            margin: 2rem 0 1rem;
+            color: var(--text-primary);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--bg-tertiary);
+        }
+        
+        th {
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+        
+        a {
+            color: var(--accent-light);
+            text-decoration: none;
+        }
+        
+        a:hover {
+            text-decoration: underline;
+        }
+        
+        .full-width {
+            grid-column: 1 / -1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Scientific Code Analysis Report</h1>
+            <p class="subtitle">Automated analysis connecting research paper to implementation</p>
+            <p style="margin-top: 1rem; color: var(--text-secondary);">
+                Generated: 2025-11-26 18:11:28
+            </p>
+        </header>
+        
+        <div class="grid">
+            <div class="card">
+                <h2>Paper Information</h2>
+                <p><strong>Title:</strong> [image]</p>
+                <p><strong>Authors:</strong> </p>
+                <p style="margin-top: 1rem;"><strong>Abstract:</strong></p>
+                <p style="color: var(--text-secondary); font-size: 0.9rem;">
+                    Comments Journal reference ACM
+classification MSC classification Report number arXiv identifier DOI
+ORCID arXiv author ID Help pages Full text
+Search
+[image]
+[image]
+GO
+quick links
+•  Login
+•  Help Pages
+•  About
+Computer Science >
+Computation and Language
+arXiv:1706.03762 (cs)
+[Submitted on 12 Jun 2017 (v1), last revised 2 Aug 2023 (this
+version, v7)]
+Title:Attention Is All You Need
+Authors:Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob
+Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, I...
+                </p>
+            </div>
+            
+            <div class="card">
+                <h2>Repository Information</h2>
+                <p><strong>Name:</strong> pytorch</p>
+                <p><strong>Language:</strong> python</p>
+                <p><strong>Files:</strong> 8930</p>
+                <p><strong>Dependencies:</strong> 16</p>
+                <p style="margin-top: 0.5rem;">
+                    <a href="https://github.com/pytorch/pytorch" target="_blank">View Repository →</a>
+                </p>
+            </div>
+        </div>
+        
+        <div class="grid">
+            <div class="card">
+                <h2>Execution Summary</h2>
+                <div class="stat-grid">
+                    <div class="stat">
+                        <div class="stat-value success">0</div>
+                        <div class="stat-label">Passed</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value error">8</div>
+                        <div class="stat-label">Failed</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">11.7s</div>
+                        <div class="stat-label">Total Time</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">0</div>
+                        <div class="stat-label">Visualizations</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>Knowledge Graph</h2>
+                <div class="stat-grid">
+                    <div class="stat">
+                        <div class="stat-value">312</div>
+                        <div class="stat-label">Nodes</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">327</div>
+                        <div class="stat-label">Edges</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <h2 class="section-title">Concept-to-Code Mappings</h2>
+        <div class="card">
+            
+            <p style="color: var(--text-secondary);">No mappings generated.</p>
+            
+        </div>
+        
+        <h2 class="section-title">Generated Code</h2>
+        <div class="grid">
+            
+            <div class="card">
+                <h2>test_transformer_concepts.py</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 1rem;">Tests the scaled dot-product attention, multi-head attention, and positional encoding components of the Transformer model.</p>
+                <div class="code-block">
+                    <pre>"""
+Test Transformer Key Concepts
+
+This script demonstrates the key concepts of the Transformer architecture
+as described in the 'Attention is All You Need' paper.
+
+Author: CodingAgent
+Generated: 2024-02-29
+"""
+
+import sys
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
+
+def scaled_dot_product_attention(Q, K, V, mask=None):
+    """Scaled Dot-Product Attention mechanism."""
+    d_k = K.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, -1e9)
+    attention_weights = F.softmax(scores, dim=-1)
+    output = torch.matmul(attention_weights, V)
+    return output, attention_weights
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        self.d_k = d_model // num_heads
+        self.W_Q = nn.Linear(d_model, d_model)
+        self.W_K = nn.Linear(d_model, d_model)
+        self.W_V = nn.Linear(d_model, d_model)
+        self.W_O = nn.Linear(d_model, d_model)
+
+    def forward(self, Q, K, V, mask=None):
+        batch_size = Q.size(0)
+        Q = self.W_Q(Q).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.W_K(K).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.W_V(V).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+
+        output, attention_weights = scaled_dot_product_attention(Q, K, V, mask)
+
+        output = output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+        output = self.W_O(output)
+        return output, attention_weights
+
+def positional_encoding(max_len, d_model):
+    """Generate positional encodings."""
+    PE = torch.zeros(max_len, d_model)
+    position = torch.arange...</pre>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>visualize_attention.py</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 1rem;">Generates a heatmap visualization of the attention weights produced by the scaled dot-product attention mechanism.</p>
+                <div class="code-block">
+                    <pre>import torch
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+
+def scaled_dot_product_attention(Q, K, V, mask=None):
+    """Scaled Dot-Product Attention mechanism."""
+    d_k = K.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, -1e9)
+    attention_weights = F.softmax(scores, dim=-1)
+    output = torch.matmul(attention_weights, V)
+    return output, attention_weights
+
+def visualize_attention_weights(attention_weights, filename='attention_weights.png'):
+    """Visualizes attention weights as a heatmap."""
+    plt.figure(figsize=(8, 6))
+    plt.imshow(attention_weights.squeeze().detach().numpy(), cmap='viridis')
+    plt.colorbar()
+    plt.xlabel("Key Positions")
+    plt.ylabel("Query Positions")
+    plt.title("Attention Weights")
+    plt.savefig(filename)
+    plt.close()
+
+def main():
+    # Example usage: visualize attention weights
+    Q = torch.randn(1, 5, 64)
+    K = torch.randn(1, 5, 64)
+    V = torch.randn(1, 5, 64)
+    _, attention_weights = scaled_dot_product_attention(Q, K, V)
+    visualize_attention_weights(attention_weights, 'attention_weights.png')
+    print("Attention weights visualization saved to attention_weights.png")
+
+if __name__ == "__main__":
+    main()</pre>
+                </div>
+            </div>
+            
+        </div>
+        
+        
+        
+        <h2 class="section-title">Execution Timeline</h2>
+        <div class="card">
+            <div class="timeline">
+                
+                <div class="timeline-item ">
+                    <strong>parsing_paper</strong>
+                    <p>Parsing scientific paper: https://arxiv.org/abs/1706.03762</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:00:01.134491</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>parsing_paper</strong>
+                    <p>Paper parsed: [image]</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:00:18.986224</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>analyzing_repo</strong>
+                    <p>Analyzing repository: https://github.com/pytorch/pytorch</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:00:18.989229</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>analyzing_repo</strong>
+                    <p>Repository analyzed: pytorch</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:00:59.284692</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>mapping_concepts</strong>
+                    <p>Mapping paper concepts to code implementations</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:00:59.286624</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>mapping_concepts</strong>
+                    <p>Mapped 0 concept-code relationships</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:01:00.481269</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>generating_code</strong>
+                    <p>Generating test scripts</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:01:00.483584</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>generating_code</strong>
+                    <p>Generated 2 code files</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:01:18.475148</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>setting_up_environment</strong>
+                    <p>Setting up execution environment</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:01:18.477165</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>setting_up_environment</strong>
+                    <p>Environment ready: local</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:01:20.276301</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>executing_code</strong>
+                    <p>Executing generated code</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:01:20.276301</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>executing_code</strong>
+                    <p>✗ fixed_2_test_transformer_concepts.py</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:10:55.321380</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>executing_code</strong>
+                    <p>✗ fixed_2_visualize_attention.py</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:11:28.816770</small>
+                </div>
+                
+                <div class="timeline-item ">
+                    <strong>generating_report</strong>
+                    <p>Generating comprehensive report</p>
+                    <small style="color: var(--text-secondary);">2025-11-26T18:11:28.819443</small>
+                </div>
+                
+            </div>
+        </div>
+        
+        <h2 class="section-title">Execution Results</h2>
+        <div class="card full-width">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Time</th>
+                        <th>Output Files</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+                    <tr>
+                        <td>
+                            <span class="badge badge-error">
+                                FAIL
+                            </span>
+                        </td>
+                        <td>0.13s</td>
+                        <td>requirements.txt</td>
+                        <td>
+                            
+                            <small class="error"></small>
+                            
+                        </td>
+                    </tr>
+                    
+                    <tr>
+                        <td>
+                            <span class="badge badge-error">
+                                FAIL
+                            </span>
+                        </td>
+                        <td>2.13s</td>
+                        <td>requirements.txt</td>
+                        <td>
+                            
+                            <small class="error">Traceback (most recent call last):
+  File "C:\Users\yasse\AppData\Local\Temp\coding_agent_7fzqynu7\...</small>
+                            
+                        </td>
+                    </tr>
+                    
+                </tbody>
+            </table>
+        </div>
+        
+        <footer style="margin-top: 3rem; text-align: center; color: var(--text-secondary);">
+            <p>Generated by Scientific Agent System</p>
+            <p>Total processing time: 687.7 seconds</p>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scientific Agent System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #050508;
+            --bg-primary: #0a0a12;
+            --bg-secondary: #12121f;
+            --bg-tertiary: #1a1a2e;
+            --bg-card: #15152a;
+            --border: rgba(255, 255, 255, 0.06);
+            --border-hover: rgba(255, 255, 255, 0.12);
+            --text-primary: #f0f0f8;
+            --text-secondary: #8888a0;
+            --text-muted: #5555688;
+            --accent-primary: #6366f1;
+            --accent-secondary: #818cf8;
+            --accent-glow: rgba(99, 102, 241, 0.3);
+            --success: #10b981;
+            --success-bg: rgba(16, 185, 129, 0.15);
+            --error: #ef4444;
+            --error-bg: rgba(239, 68, 68, 0.15);
+            --warning: #f59e0b;
+            --gradient-1: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            --gradient-2: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.1) 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Space Grotesk', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background */
+        .bg-pattern {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: 
+                radial-gradient(ellipse at 20% 20%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(139, 92, 246, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(217, 70, 239, 0.04) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+            padding: 3rem 0;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .logo-icon {
+            width: 56px;
+            height: 56px;
+            background: var(--gradient-1);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.75rem;
+            box-shadow: 0 8px 32px var(--accent-glow);
+        }
+
+        h1 {
+            font-size: 2.75rem;
+            font-weight: 700;
+            background: var(--gradient-1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.15rem;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        /* Config panel */
+        .config-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .config-panel.configured {
+            border-color: var(--success);
+            background: var(--success-bg);
+        }
+
+        .config-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .config-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--error);
+        }
+
+        .status-dot.active {
+            background: var(--success);
+            box-shadow: 0 0 8px var(--success);
+        }
+
+        /* Input form */
+        .input-section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .form-group.full-width {
+            grid-column: 1 / -1;
+        }
+
+        label {
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 0.875rem 1rem;
+            font-size: 1rem;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            transition: all 0.2s ease;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        input::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Buttons */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.875rem 1.5rem;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: none;
+        }
+
+        .btn-primary {
+            background: var(--gradient-1);
+            color: white;
+            box-shadow: 0 4px 16px var(--accent-glow);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px var(--accent-glow);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-secondary);
+            border-color: var(--border-hover);
+        }
+
+        .btn-icon {
+            width: 40px;
+            height: 40px;
+            padding: 0;
+            border-radius: 10px;
+        }
+
+        /* Progress section */
+        .progress-section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            display: none;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .progress-bar-container {
+            height: 8px;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 1.5rem;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: var(--gradient-1);
+            border-radius: 4px;
+            transition: width 0.5s ease;
+            position: relative;
+        }
+
+        .progress-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            animation: shimmer 1.5s infinite;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        .progress-stages {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+
+        .stage-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-secondary);
+            border-radius: 999px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
+        .stage-badge.active {
+            background: var(--accent-glow);
+            color: var(--accent-secondary);
+            border-color: var(--accent-primary);
+        }
+
+        .stage-badge.completed {
+            background: var(--success-bg);
+            color: var(--success);
+            border-color: var(--success);
+        }
+
+        .stage-badge.error {
+            background: var(--error-bg);
+            color: var(--error);
+            border-color: var(--error);
+        }
+
+        /* Event log */
+        .event-log {
+            max-height: 300px;
+            overflow-y: auto;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            margin-top: 1.5rem;
+        }
+
+        .event-item {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 1rem;
+        }
+
+        .event-item:last-child {
+            border-bottom: none;
+        }
+
+        .event-time {
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        .event-message {
+            color: var(--text-primary);
+        }
+
+        .event-item.error .event-message {
+            color: var(--error);
+        }
+
+        /* Results section */
+        .results-section {
+            display: none;
+        }
+
+        .results-section.active {
+            display: block;
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        .result-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .result-card h3 {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--accent-secondary);
+        }
+
+        .result-card h3::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: var(--gradient-1);
+            border-radius: 2px;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+        }
+
+        .stat-item {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            background: var(--gradient-1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-top: 0.25rem;
+        }
+
+        /* Code display */
+        .code-display {
+            background: var(--bg-primary);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-top: 1rem;
+        }
+
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .code-filename {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .code-content {
+            padding: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            line-height: 1.6;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre;
+            color: var(--text-primary);
+        }
+
+        /* Mappings */
+        .mapping-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .mapping-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 1rem;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            flex-wrap: wrap;
+        }
+
+        .mapping-concept {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .mapping-arrow {
+            color: var(--accent-primary);
+            font-size: 1.25rem;
+        }
+
+        .mapping-code {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--success);
+            background: var(--success-bg);
+            padding: 0.25rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .mapping-confidence {
+            margin-left: auto;
+            padding: 0.25rem 0.75rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .confidence-high {
+            background: var(--success-bg);
+            color: var(--success);
+        }
+
+        .confidence-medium {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--warning);
+        }
+
+        .confidence-low {
+            background: var(--error-bg);
+            color: var(--error);
+        }
+
+        /* Visualizations */
+        .viz-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .viz-item {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .viz-item img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .viz-caption {
+            padding: 0.75rem;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.5rem;
+        }
+
+        .tab-btn {
+            padding: 0.75rem 1.25rem;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-family: inherit;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+        }
+
+        .tab-btn:hover {
+            color: var(--text-primary);
+            background: var(--bg-secondary);
+        }
+
+        .tab-btn.active {
+            color: var(--accent-secondary);
+            background: var(--accent-glow);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Toast notifications */
+        .toast-container {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .toast {
+            padding: 1rem 1.5rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        .toast.success {
+            border-color: var(--success);
+        }
+
+        .toast.error {
+            border-color: var(--error);
+        }
+
+        /* Loading spinner */
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--bg-tertiary);
+            border-top-color: var(--accent-primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-primary);
+        }
+
+        /* Checkbox */
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .checkbox {
+            width: 20px;
+            height: 20px;
+            appearance: none;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .checkbox:checked {
+            background: var(--accent-primary);
+            border-color: var(--accent-primary);
+        }
+
+        .checkbox:checked::after {
+            content: '✓';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 0.75rem;
+        }
+
+        /* Responsive */
+        @media (max-width: 640px) {
+            h1 {
+                font-size: 2rem;
+            }
+            
+            .container {
+                padding: 1rem;
+            }
+            
+            .input-section,
+            .progress-section,
+            .result-card {
+                padding: 1.25rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-pattern"></div>
+    
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon">🔬</div>
+                <h1>Scientific Agent System</h1>
+            </div>
+            <p class="subtitle">
+                LLM-powered pipeline that automatically analyzes scientific papers, 
+                maps concepts to code, and generates executable test scripts
+            </p>
+        </header>
+
+        <!-- Configuration -->
+        <div class="config-panel" id="configPanel">
+            <div class="config-header">
+                <h3>⚙️ API Configuration</h3>
+                <div class="config-status">
+                    <span class="status-dot" id="configStatus"></span>
+                    <span id="configStatusText">Not configured</span>
+                </div>
+            </div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>🔑 Primary Gemini API Key</label>
+                    <input type="password" id="geminiKey" placeholder="Enter your Gemini API key">
+                </div>
+                <div class="form-group">
+                    <label>🔑 Additional API Keys (optional, comma-separated)</label>
+                    <input type="text" id="geminiKeysExtra" placeholder="key2, key3, key4 - for rate limit handling">
+                </div>
+                <div class="form-group">
+                    <label>🐙 GitHub Token (optional)</label>
+                    <input type="password" id="githubToken" placeholder="For private repos">
+                </div>
+                <div class="form-group">
+                    <button class="btn btn-secondary" onclick="saveConfig()">
+                        💾 Save Configuration
+                    </button>
+                    <span id="keyCount" style="margin-left: 1rem; color: var(--text-secondary);"></span>
+                </div>
+            </div>
+            <p style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary);">
+                💡 Tip: Add multiple API keys to avoid rate limiting. Get free keys at 
+                <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color: var(--accent-secondary);">Google AI Studio</a>
+            </p>
+        </div>
+
+        <!-- Input Section -->
+        <div class="input-section">
+            <h2 style="margin-bottom: 1.5rem; font-size: 1.25rem;">📊 Analysis Inputs</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>📄 Scientific Paper URL</label>
+                    <input type="text" id="paperUrl" placeholder="https://arxiv.org/abs/2301.xxxxx or PDF URL">
+                </div>
+                <div class="form-group">
+                    <label>📁 GitHub Repository URL</label>
+                    <input type="text" id="repoUrl" placeholder="https://github.com/username/repo">
+                </div>
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" class="checkbox" id="autoFix" checked>
+                        <label for="autoFix">Auto-fix code errors</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" class="checkbox" id="useDocker" checked>
+                        <label for="useDocker">Use Docker sandbox</label>
+                    </div>
+                </div>
+                <div class="form-group full-width" style="margin-top: 1rem;">
+                    <button class="btn btn-primary" id="startBtn" onclick="startPipeline()">
+                        🚀 Start Analysis
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div class="progress-section" id="progressSection">
+            <div class="progress-header">
+                <h2>⏳ Pipeline Progress</h2>
+                <span id="progressPercent">0%</span>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+            </div>
+            <div class="progress-stages" id="stageIndicators">
+                <span class="stage-badge" data-stage="parsing_paper">📄 Parsing Paper</span>
+                <span class="stage-badge" data-stage="analyzing_repo">📁 Analyzing Repo</span>
+                <span class="stage-badge" data-stage="mapping_concepts">🔗 Mapping Concepts</span>
+                <span class="stage-badge" data-stage="generating_code">💻 Generating Code</span>
+                <span class="stage-badge" data-stage="setting_up_environment">🐳 Setting Up Env</span>
+                <span class="stage-badge" data-stage="executing_code">▶️ Executing</span>
+                <span class="stage-badge" data-stage="generating_report">📊 Report</span>
+            </div>
+            <div class="event-log" id="eventLog"></div>
+        </div>
+
+        <!-- Results Section -->
+        <div class="results-section" id="resultsSection">
+            <div class="results-header">
+                <h2>📊 Analysis Results</h2>
+                <div style="display: flex; gap: 0.75rem;">
+                    <button class="btn btn-secondary" onclick="openReport()">
+                        📑 View Full Report
+                    </button>
+                    <button class="btn btn-secondary" onclick="downloadData()">
+                        💾 Download Data
+                    </button>
+                </div>
+            </div>
+
+            <div class="tabs">
+                <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
+                <button class="tab-btn" onclick="switchTab('mappings')">Concept Mappings</button>
+                <button class="tab-btn" onclick="switchTab('code')">Generated Code</button>
+                <button class="tab-btn" onclick="switchTab('visualizations')">Visualizations</button>
+                <button class="tab-btn" onclick="switchTab('graph')">Knowledge Graph</button>
+            </div>
+
+            <!-- Overview Tab -->
+            <div class="tab-content active" id="tab-overview">
+                <div class="result-card">
+                    <h3>Paper Information</h3>
+                    <div id="paperInfo"></div>
+                </div>
+                <div class="result-card">
+                    <h3>Repository Information</h3>
+                    <div id="repoInfo"></div>
+                </div>
+                <div class="result-card">
+                    <h3>Execution Summary</h3>
+                    <div class="stat-grid" id="execStats"></div>
+                </div>
+            </div>
+
+            <!-- Mappings Tab -->
+            <div class="tab-content" id="tab-mappings">
+                <div class="result-card">
+                    <h3>Concept to Code Mappings</h3>
+                    <div class="mapping-list" id="mappingsList"></div>
+                </div>
+            </div>
+
+            <!-- Code Tab -->
+            <div class="tab-content" id="tab-code">
+                <div class="result-card">
+                    <h3>Generated Test Scripts</h3>
+                    <div id="codeList"></div>
+                </div>
+            </div>
+
+            <!-- Visualizations Tab -->
+            <div class="tab-content" id="tab-visualizations">
+                <div class="result-card">
+                    <h3>Generated Visualizations</h3>
+                    <div class="viz-grid" id="vizGrid"></div>
+                </div>
+            </div>
+
+            <!-- Knowledge Graph Tab -->
+            <div class="tab-content" id="tab-graph">
+                <div class="result-card">
+                    <h3>Knowledge Graph</h3>
+                    <iframe id="graphFrame" style="width: 100%; height: 600px; border: none; border-radius: 12px; background: var(--bg-secondary);"></iframe>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        // State
+        let currentRunId = null;
+        let ws = null;
+        let results = null;
+
+        // API base URL
+        const API_BASE = window.location.origin;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            checkConfig();
+        });
+
+        // Check if API is configured
+        async function checkConfig() {
+            try {
+                const res = await fetch(`${API_BASE}/api/config/status`);
+                const data = await res.json();
+                updateConfigStatus(data.configured);
+            } catch (e) {
+                console.error('Failed to check config:', e);
+            }
+        }
+
+        // Update config status UI
+        function updateConfigStatus(configured) {
+            const panel = document.getElementById('configPanel');
+            const dot = document.getElementById('configStatus');
+            const text = document.getElementById('configStatusText');
+
+            if (configured) {
+                panel.classList.add('configured');
+                dot.classList.add('active');
+                text.textContent = 'Configured';
+            } else {
+                panel.classList.remove('configured');
+                dot.classList.remove('active');
+                text.textContent = 'Not configured';
+            }
+        }
+
+        // Save configuration
+        async function saveConfig() {
+            const geminiKey = document.getElementById('geminiKey').value;
+            const geminiKeysExtra = document.getElementById('geminiKeysExtra').value;
+            const githubToken = document.getElementById('githubToken').value;
+
+            if (!geminiKey) {
+                showToast('Please enter at least one Gemini API key', 'error');
+                return;
+            }
+
+            // Parse additional keys
+            let additionalKeys = [];
+            if (geminiKeysExtra) {
+                additionalKeys = geminiKeysExtra.split(',')
+                    .map(k => k.trim())
+                    .filter(k => k.length > 0);
+            }
+
+            try {
+                const res = await fetch(`${API_BASE}/api/config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        gemini_api_key: geminiKey,
+                        gemini_api_keys: additionalKeys.length > 0 ? additionalKeys : null,
+                        github_token: githubToken || null
+                    })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    updateConfigStatus(true);
+                    document.getElementById('keyCount').textContent = 
+                        `${data.api_keys_registered} API key(s) registered`;
+                    showToast(`Configuration saved! ${data.api_keys_registered} API key(s) ready.`, 'success');
+                } else {
+                    throw new Error('Failed to save config');
+                }
+            } catch (e) {
+                showToast('Failed to save configuration', 'error');
+            }
+        }
+
+        // Start pipeline
+        async function startPipeline() {
+            const paperUrl = document.getElementById('paperUrl').value;
+            const repoUrl = document.getElementById('repoUrl').value;
+            const autoFix = document.getElementById('autoFix').checked;
+            const useDocker = document.getElementById('useDocker').checked;
+
+            if (!paperUrl || !repoUrl) {
+                showToast('Please enter both paper and repository URLs', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('startBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Starting...';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/pipeline/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        paper_url: paperUrl,
+                        repo_url: repoUrl,
+                        auto_fix_errors: autoFix,
+                        use_docker: useDocker
+                    })
+                });
+
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.detail || 'Failed to start pipeline');
+                }
+
+                const data = await res.json();
+                currentRunId = data.run_id;
+
+                // Show progress section
+                document.getElementById('progressSection').classList.add('active');
+                document.getElementById('resultsSection').classList.remove('active');
+
+                // Clear previous events
+                document.getElementById('eventLog').innerHTML = '';
+
+                // Reset stage indicators
+                document.querySelectorAll('.stage-badge').forEach(badge => {
+                    badge.classList.remove('active', 'completed', 'error');
+                });
+
+                // Connect WebSocket
+                connectWebSocket(currentRunId);
+
+                showToast('Pipeline started!', 'success');
+
+            } catch (e) {
+                showToast(e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '🚀 Start Analysis';
+            }
+        }
+
+        // WebSocket connection
+        function connectWebSocket(runId) {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/${runId}`);
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleWebSocketMessage(data);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket closed');
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            // Keep alive
+            setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send('ping');
+                }
+            }, 30000);
+        }
+
+        // Handle WebSocket messages
+        function handleWebSocketMessage(data) {
+            if (data.type === 'progress') {
+                updateProgress(data.progress, data.stage, data.message);
+                addEventLog(data.message, data.is_error);
+                updateStageIndicator(data.stage, data.is_error);
+            } else if (data.type === 'completed') {
+                if (data.success) {
+                    showToast('Analysis completed successfully!', 'success');
+                    loadResults(currentRunId);
+                } else {
+                    showToast(`Analysis failed: ${data.error}`, 'error');
+                }
+                updateProgress(100, data.success ? 'completed' : 'failed', '');
+            } else if (data.type === 'error') {
+                showToast(`Error: ${data.error}`, 'error');
+            }
+        }
+
+        // Update progress bar
+        function updateProgress(percent, stage, message) {
+            document.getElementById('progressBar').style.width = `${percent}%`;
+            document.getElementById('progressPercent').textContent = `${percent}%`;
+        }
+
+        // Add event to log
+        function addEventLog(message, isError = false) {
+            const log = document.getElementById('eventLog');
+            const time = new Date().toLocaleTimeString();
+            const item = document.createElement('div');
+            item.className = `event-item${isError ? ' error' : ''}`;
+            item.innerHTML = `
+                <span class="event-time">${time}</span>
+                <span class="event-message">${message}</span>
+            `;
+            log.appendChild(item);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        // Update stage indicators
+        function updateStageIndicator(stage, isError = false) {
+            const badges = document.querySelectorAll('.stage-badge');
+            const stageOrder = [
+                'parsing_paper', 'analyzing_repo', 'mapping_concepts',
+                'generating_code', 'setting_up_environment', 'executing_code',
+                'generating_report', 'completed'
+            ];
+
+            const currentIndex = stageOrder.indexOf(stage);
+
+            badges.forEach(badge => {
+                const badgeStage = badge.dataset.stage;
+                const badgeIndex = stageOrder.indexOf(badgeStage);
+
+                badge.classList.remove('active', 'completed', 'error');
+
+                if (badgeIndex < currentIndex) {
+                    badge.classList.add('completed');
+                } else if (badgeIndex === currentIndex) {
+                    badge.classList.add(isError ? 'error' : 'active');
+                }
+            });
+        }
+
+        // Load results
+        async function loadResults(runId) {
+            try {
+                const res = await fetch(`${API_BASE}/api/pipeline/${runId}/result`);
+                results = await res.json();
+
+                // Show results section
+                document.getElementById('resultsSection').classList.add('active');
+
+                // Populate tabs
+                populateOverview(results);
+                populateMappings(results.concept_mappings);
+                populateCode(results.generated_code);
+                populateVisualizations(results.visualizations, runId);
+                loadKnowledgeGraph(runId);
+
+            } catch (e) {
+                showToast('Failed to load results', 'error');
+            }
+        }
+
+        // Populate overview tab
+        function populateOverview(data) {
+            // Paper info
+            const paperInfo = document.getElementById('paperInfo');
+            if (data.paper_info) {
+                paperInfo.innerHTML = `
+                    <p><strong>Title:</strong> ${data.paper_info.title || 'N/A'}</p>
+                    <p><strong>Authors:</strong> ${(data.paper_info.authors || []).join(', ') || 'N/A'}</p>
+                    <p style="margin-top: 0.5rem;"><strong>Keywords:</strong> ${(data.paper_info.keywords || []).join(', ') || 'N/A'}</p>
+                `;
+            }
+
+            // Repo info
+            const repoInfo = document.getElementById('repoInfo');
+            if (data.repo_info) {
+                repoInfo.innerHTML = `
+                    <p><strong>Name:</strong> ${data.repo_info.name || 'N/A'}</p>
+                    <p><strong>Language:</strong> ${data.repo_info.main_language || 'N/A'}</p>
+                    <p><strong>Files:</strong> ${data.repo_info.file_count || 0}</p>
+                    <p><strong>Dependencies:</strong> ${data.repo_info.dependency_count || 0}</p>
+                `;
+            }
+
+            // Execution stats
+            const execStats = document.getElementById('execStats');
+            const passed = data.execution_results?.filter(r => r.success).length || 0;
+            const failed = data.execution_results?.filter(r => !r.success).length || 0;
+            execStats.innerHTML = `
+                <div class="stat-item">
+                    <div class="stat-value">${passed}</div>
+                    <div class="stat-label">Tests Passed</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" style="color: var(--error)">${failed}</div>
+                    <div class="stat-label">Tests Failed</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">${data.concept_mappings?.length || 0}</div>
+                    <div class="stat-label">Mappings</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">${data.total_time?.toFixed(1) || 0}s</div>
+                    <div class="stat-label">Total Time</div>
+                </div>
+            `;
+        }
+
+        // Populate mappings tab
+        function populateMappings(mappings) {
+            const list = document.getElementById('mappingsList');
+            if (!mappings || mappings.length === 0) {
+                list.innerHTML = '<p style="color: var(--text-secondary);">No mappings generated.</p>';
+                return;
+            }
+
+            list.innerHTML = mappings.map(m => {
+                const confidence = m.confidence || 0;
+                const confClass = confidence > 0.7 ? 'high' : confidence > 0.4 ? 'medium' : 'low';
+                return `
+                    <div class="mapping-item">
+                        <span class="mapping-concept">${m.concept_name || 'Unknown'}</span>
+                        <span class="mapping-arrow">→</span>
+                        <span class="mapping-code">${m.code_element || 'N/A'}</span>
+                        <span class="mapping-confidence confidence-${confClass}">${(confidence * 100).toFixed(0)}%</span>
+                        ${m.reasoning ? `<p style="width: 100%; margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.85rem;">${m.reasoning}</p>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Populate code tab
+        function populateCode(codeFiles) {
+            const container = document.getElementById('codeList');
+            if (!codeFiles || codeFiles.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-secondary);">No code generated.</p>';
+                return;
+            }
+
+            container.innerHTML = codeFiles.map(file => `
+                <div class="code-display">
+                    <div class="code-header">
+                        <span class="code-filename">${file.filename}</span>
+                        <button class="btn btn-secondary btn-icon" onclick="copyCode('${btoa(file.content)}')">📋</button>
+                    </div>
+                    <div class="code-content">${escapeHtml(file.content)}</div>
+                </div>
+            `).join('');
+        }
+
+        // Populate visualizations tab
+        function populateVisualizations(visualizations, runId) {
+            const grid = document.getElementById('vizGrid');
+            if (!visualizations || visualizations.length === 0) {
+                grid.innerHTML = '<p style="color: var(--text-secondary);">No visualizations generated.</p>';
+                return;
+            }
+
+            grid.innerHTML = visualizations.map(viz => `
+                <div class="viz-item">
+                    <img src="${API_BASE}/api/pipeline/${runId}/visualization/${viz.filename}" alt="${viz.filename}">
+                    <div class="viz-caption">${viz.filename}</div>
+                </div>
+            `).join('');
+        }
+
+        // Load knowledge graph
+        async function loadKnowledgeGraph(runId) {
+            const frame = document.getElementById('graphFrame');
+            // For now, just set a placeholder. In production, you'd load the actual graph visualization
+            frame.srcdoc = `
+                <html>
+                <body style="margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh; background: #12121f; color: #888;">
+                    <p>Knowledge graph visualization will be loaded here</p>
+                </body>
+                </html>
+            `;
+        }
+
+        // Tab switching
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            
+            event.target.classList.add('active');
+            document.getElementById(`tab-${tabName}`).classList.add('active');
+        }
+
+        // Open report
+        function openReport() {
+            if (currentRunId) {
+                window.open(`${API_BASE}/api/pipeline/${currentRunId}/report`, '_blank');
+            }
+        }
+
+        // Download data
+        async function downloadData() {
+            if (!results) return;
+            
+            const blob = new Blob([JSON.stringify(results, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `analysis_${currentRunId}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Copy code to clipboard
+        function copyCode(b64Content) {
+            const content = atob(b64Content);
+            navigator.clipboard.writeText(content).then(() => {
+                showToast('Code copied to clipboard!', 'success');
+            });
+        }
+
+        // Show toast notification
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `
+                <span>${type === 'success' ? '✓' : type === 'error' ? '✗' : 'ℹ'}</span>
+                <span>${message}</span>
+            `;
+            container.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.animation = 'slideIn 0.3s ease reverse';
+                setTimeout(() => toast.remove(), 300);
+            }, 4000);
+        }
+
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

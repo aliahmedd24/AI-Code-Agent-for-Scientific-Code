@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  # Main Scientific Agent System
+  scientific-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scientific-agent-system
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./outputs:/app/outputs
+      - /var/run/docker.sock:/var/run/docker.sock  # For Docker-in-Docker
+      - agent-temp:/app/temp
+    networks:
+      - agent-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Python sandbox for code execution
+  python-sandbox:
+    image: python:3.11-slim
+    container_name: python-sandbox
+    command: tail -f /dev/null
+    volumes:
+      - sandbox-workspace:/workspace
+    networks:
+      - agent-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # Optional: Redis for caching and task queue
+  redis:
+    image: redis:7-alpine
+    container_name: agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - agent-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+networks:
+  agent-network:
+    driver: bridge
+
+volumes:
+  agent-temp:
+  sandbox-workspace:
+  redis-data:
