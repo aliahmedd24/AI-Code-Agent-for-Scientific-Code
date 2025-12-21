@@ -14,9 +14,13 @@ from datetime import datetime
 from typing import Optional, Any, Dict, List, Set, Tuple, Union
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-import networkx as nx
-from collections import defaultdict
 import asyncio
+from collections import defaultdict
+
+try:
+    import networkx as nx
+except ImportError:
+    nx = None
 
 
 class NodeType(Enum):
@@ -30,6 +34,7 @@ class NodeType(Enum):
     TABLE = "table"
     CITATION = "citation"
     AUTHOR = "author"
+    ALGORITHM = "algorithm"
     
     # Code-related
     REPOSITORY = "repository"
@@ -81,6 +86,9 @@ class EdgeType(Enum):
     CREATED_BY = "created_by"
     ANALYZED_BY = "analyzed_by"
     MODIFIED_BY = "modified_by"
+    USES = "uses"
+    TESTS = "tests"
+    GENERATES = "generates"
 
 
 @dataclass
@@ -94,7 +102,7 @@ class KnowledgeNode:
     embeddings: Optional[List[float]] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    source: str = ""  # paper, repo, agent, etc.
+    source: str = ""
     confidence: float = 1.0
     
     def to_dict(self) -> Dict[str, Any]:
@@ -136,7 +144,7 @@ class KnowledgeEdge:
     weight: float = 1.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    created_by: str = ""  # Agent that created this edge
+    created_by: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -164,11 +172,14 @@ class KnowledgeGraph:
     
     def __init__(self, name: str = "default"):
         self.name = name
-        self.graph = nx.MultiDiGraph()
+        if nx:
+            self.graph = nx.MultiDiGraph()
+        else:
+            self.graph = None
         self._nodes: Dict[str, KnowledgeNode] = {}
         self._edges: List[KnowledgeEdge] = []
         self._index: Dict[NodeType, Set[str]] = defaultdict(set)
-        self._content_index: Dict[str, Set[str]] = defaultdict(set)  # word -> node_ids
+        self._content_index: Dict[str, Set[str]] = defaultdict(set)
         self._lock = asyncio.Lock()
         self.created_at = datetime.now().isoformat()
         self.updated_at = datetime.now().isoformat()
@@ -187,20 +198,7 @@ class KnowledgeGraph:
         source: str = "",
         node_id: Optional[str] = None
     ) -> str:
-        """
-        Add a node to the knowledge graph.
-        
-        Args:
-            node_type: Type of the node
-            name: Name/title of the node
-            content: Full content/description
-            metadata: Additional metadata
-            source: Source of this knowledge
-            node_id: Optional custom ID
-        
-        Returns:
-            The node ID
-        """
+        """Add a node to the knowledge graph."""
         async with self._lock:
             if node_id is None:
                 node_id = self._generate_id(node_type, name, content)
@@ -222,12 +220,14 @@ class KnowledgeGraph:
                     source=source
                 )
                 self._nodes[node_id] = node
-                self.graph.add_node(node_id, **node.to_dict())
                 self._index[node_type].add(node_id)
                 
-                # Index content for search
-                words = set(name.lower().split() + content.lower().split()[:100])
-                for word in words:
+                # Add to networkx graph
+                if self.graph is not None:
+                    self.graph.add_node(node_id, **node.to_dict())
+                
+                # Update content index
+                for word in name.lower().split() + content.lower().split()[:50]:
                     if len(word) > 2:
                         self._content_index[word].add(node_id)
             
@@ -243,20 +243,7 @@ class KnowledgeGraph:
         metadata: Optional[Dict[str, Any]] = None,
         created_by: str = ""
     ) -> bool:
-        """
-        Add an edge between two nodes.
-        
-        Args:
-            source_id: Source node ID
-            target_id: Target node ID
-            edge_type: Type of relationship
-            weight: Edge weight (importance)
-            metadata: Additional metadata
-            created_by: Agent that created this edge
-        
-        Returns:
-            True if edge was added, False if nodes don't exist
-        """
+        """Add an edge between nodes."""
         async with self._lock:
             if source_id not in self._nodes or target_id not in self._nodes:
                 return False
@@ -271,12 +258,14 @@ class KnowledgeGraph:
             )
             
             self._edges.append(edge)
-            self.graph.add_edge(
-                source_id,
-                target_id,
-                key=edge_type.value,
-                **edge.to_dict()
-            )
+            
+            if self.graph is not None:
+                self.graph.add_edge(
+                    source_id,
+                    target_id,
+                    key=edge_type.value,
+                    **edge.to_dict()
+                )
             
             self.updated_at = datetime.now().isoformat()
             return True
@@ -295,35 +284,26 @@ class KnowledgeGraph:
         edge_type: Optional[EdgeType] = None,
         direction: str = "both"
     ) -> List[Tuple[str, KnowledgeNode, EdgeType]]:
-        """
-        Get neighboring nodes.
-        
-        Args:
-            node_id: The node to get neighbors for
-            edge_type: Filter by edge type
-            direction: 'in', 'out', or 'both'
-        
-        Returns:
-            List of (edge_key, neighbor_node, edge_type) tuples
-        """
+        """Get neighboring nodes."""
         if node_id not in self._nodes:
             return []
         
         neighbors = []
         
-        if direction in ("out", "both"):
-            for _, target, key, data in self.graph.out_edges(node_id, keys=True, data=True):
-                et = EdgeType(data.get("edge_type", key))
-                if edge_type is None or et == edge_type:
-                    if target in self._nodes:
-                        neighbors.append((key, self._nodes[target], et))
-        
-        if direction in ("in", "both"):
-            for source, _, key, data in self.graph.in_edges(node_id, keys=True, data=True):
-                et = EdgeType(data.get("edge_type", key))
-                if edge_type is None or et == edge_type:
-                    if source in self._nodes:
-                        neighbors.append((key, self._nodes[source], et))
+        if self.graph is not None:
+            if direction in ("out", "both"):
+                for _, target, key, data in self.graph.out_edges(node_id, keys=True, data=True):
+                    et = EdgeType(data.get("edge_type", key))
+                    if edge_type is None or et == edge_type:
+                        if target in self._nodes:
+                            neighbors.append((key, self._nodes[target], et))
+            
+            if direction in ("in", "both"):
+                for source, _, key, data in self.graph.in_edges(node_id, keys=True, data=True):
+                    et = EdgeType(data.get("edge_type", key))
+                    if edge_type is None or et == edge_type:
+                        if source in self._nodes:
+                            neighbors.append((key, self._nodes[source], et))
         
         return neighbors
     
@@ -333,54 +313,36 @@ class KnowledgeGraph:
         node_types: Optional[List[NodeType]] = None,
         limit: int = 10
     ) -> List[Tuple[KnowledgeNode, float]]:
-        """
-        Search for nodes matching a query.
-        
-        Args:
-            query: Search query
-            node_types: Filter by node types
-            limit: Maximum results
-        
-        Returns:
-            List of (node, relevance_score) tuples
-        """
+        """Search for nodes matching a query."""
         query_words = set(query.lower().split())
-        scores: Dict[str, float] = defaultdict(float)
+        candidates: Dict[str, float] = defaultdict(float)
         
         for word in query_words:
-            # Exact matches
-            if word in self._content_index:
-                for node_id in self._content_index[word]:
-                    scores[node_id] += 2.0
-            
-            # Partial matches
-            for indexed_word, node_ids in self._content_index.items():
-                if word in indexed_word or indexed_word in word:
-                    for node_id in node_ids:
-                        scores[node_id] += 1.0
+            for node_id in self._content_index.get(word, set()):
+                if node_types is None or self._nodes[node_id].node_type in node_types:
+                    candidates[node_id] += 1.0
         
-        # Filter by type and sort by score
-        results = []
-        for node_id, score in sorted(scores.items(), key=lambda x: -x[1]):
-            node = self._nodes.get(node_id)
-            if node:
-                if node_types is None or node.node_type in node_types:
-                    results.append((node, score))
-                    if len(results) >= limit:
-                        break
+        # Normalize scores
+        if query_words:
+            for node_id in candidates:
+                candidates[node_id] /= len(query_words)
         
-        return results
+        # Sort and return
+        sorted_results = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
+        return [(self._nodes[nid], score) for nid, score in sorted_results[:limit]]
     
     def find_path(
         self,
         source_id: str,
-        target_id: str,
-        max_depth: int = 5
+        target_id: str
     ) -> Optional[List[str]]:
-        """Find the shortest path between two nodes."""
+        """Find shortest path between nodes."""
+        if self.graph is None:
+            return None
+        
         try:
             return nx.shortest_path(self.graph, source_id, target_id)
-        except nx.NetworkXNoPath:
+        except (nx.NetworkXNoPath, nx.NetworkXError):
             return None
     
     def get_subgraph(
@@ -389,21 +351,10 @@ class KnowledgeGraph:
         depth: int = 2,
         edge_types: Optional[List[EdgeType]] = None
     ) -> "KnowledgeGraph":
-        """
-        Extract a subgraph centered on a node.
-        
-        Args:
-            center_node_id: The center node
-            depth: How many hops to include
-            edge_types: Filter by edge types
-        
-        Returns:
-            A new KnowledgeGraph with the subgraph
-        """
+        """Extract a subgraph centered on a node."""
         if center_node_id not in self._nodes:
             return KnowledgeGraph(f"{self.name}_subgraph")
         
-        # BFS to find nodes within depth
         visited = {center_node_id}
         frontier = {center_node_id}
         
@@ -417,31 +368,24 @@ class KnowledgeGraph:
                             new_frontier.add(neighbor.id)
             frontier = new_frontier
         
-        # Create subgraph
         subgraph = KnowledgeGraph(f"{self.name}_subgraph")
         subgraph._nodes = {nid: self._nodes[nid] for nid in visited}
-        subgraph.graph = self.graph.subgraph(visited).copy()
+        if self.graph is not None:
+            subgraph.graph = self.graph.subgraph(visited).copy()
         
         return subgraph
     
     def get_paper_code_connections(self) -> List[Dict[str, Any]]:
-        """
-        Get all connections between paper concepts and code elements.
-        
-        Returns:
-            List of connection dictionaries
-        """
+        """Get all connections between paper concepts and code elements."""
         connections = []
-        
-        paper_types = {NodeType.PAPER, NodeType.SECTION, NodeType.CONCEPT, NodeType.EQUATION}
-        code_types = {NodeType.REPOSITORY, NodeType.FILE, NodeType.MODULE, NodeType.CLASS, NodeType.FUNCTION}
+        paper_types = {NodeType.CONCEPT, NodeType.ALGORITHM, NodeType.EQUATION}
+        code_types = {NodeType.CLASS, NodeType.FUNCTION, NodeType.MODULE}
         
         for edge in self._edges:
             source = self._nodes.get(edge.source_id)
             target = self._nodes.get(edge.target_id)
             
             if source and target:
-                # Check if this connects paper to code
                 if (source.node_type in paper_types and target.node_type in code_types) or \
                    (source.node_type in code_types and target.node_type in paper_types):
                     connections.append({
@@ -454,58 +398,33 @@ class KnowledgeGraph:
         
         return connections
     
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get graph statistics."""
-        type_counts = defaultdict(int)
-        for node in self._nodes.values():
-            type_counts[node.node_type.value] += 1
-        
-        edge_type_counts = defaultdict(int)
-        for edge in self._edges:
-            edge_type_counts[edge.edge_type.value] += 1
-        
-        return {
-            "name": self.name,
-            "total_nodes": len(self._nodes),
-            "total_edges": len(self._edges),
-            "node_types": dict(type_counts),
-            "edge_types": dict(edge_type_counts),
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "density": nx.density(self.graph) if len(self._nodes) > 0 else 0,
-            "is_connected": nx.is_weakly_connected(self.graph) if len(self._nodes) > 0 else True
-        }
-    
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize the graph to a dictionary."""
+        """Export graph to dictionary."""
         return {
             "name": self.name,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
             "nodes": [node.to_dict() for node in self._nodes.values()],
             "edges": [edge.to_dict() for edge in self._edges],
-            "statistics": self.get_statistics()
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "stats": {
+                "node_count": len(self._nodes),
+                "edge_count": len(self._edges),
+                "node_types": {nt.value: len(self._index[nt]) for nt in NodeType if self._index[nt]}
+            }
         }
-    
-    def to_json(self, indent: int = 2) -> str:
-        """Serialize the graph to JSON."""
-        return json.dumps(self.to_dict(), indent=indent)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "KnowledgeGraph":
-        """Deserialize from a dictionary."""
-        graph = cls(data.get("name", "default"))
-        graph.created_at = data.get("created_at", graph.created_at)
-        graph.updated_at = data.get("updated_at", graph.updated_at)
+        """Create graph from dictionary."""
+        graph = cls(data.get("name", "imported"))
         
-        # Add nodes
         for node_data in data.get("nodes", []):
             node = KnowledgeNode.from_dict(node_data)
             graph._nodes[node.id] = node
-            graph.graph.add_node(node.id, **node.to_dict())
             graph._index[node.node_type].add(node.id)
+            if graph.graph is not None:
+                graph.graph.add_node(node.id, **node.to_dict())
         
-        # Add edges
         for edge_data in data.get("edges", []):
             edge = KnowledgeEdge(
                 source_id=edge_data["source_id"],
@@ -513,166 +432,54 @@ class KnowledgeGraph:
                 edge_type=EdgeType(edge_data["edge_type"]),
                 weight=edge_data.get("weight", 1.0),
                 metadata=edge_data.get("metadata", {}),
-                created_at=edge_data.get("created_at", ""),
                 created_by=edge_data.get("created_by", "")
             )
             graph._edges.append(edge)
-            graph.graph.add_edge(
-                edge.source_id,
-                edge.target_id,
-                key=edge.edge_type.value,
-                **edge.to_dict()
-            )
+            if graph.graph is not None:
+                graph.graph.add_edge(
+                    edge.source_id,
+                    edge.target_id,
+                    key=edge.edge_type.value,
+                    **edge.to_dict()
+                )
+        
+        graph.created_at = data.get("created_at", datetime.now().isoformat())
+        graph.updated_at = data.get("updated_at", datetime.now().isoformat())
         
         return graph
     
-    @classmethod
-    def from_json(cls, json_str: str) -> "KnowledgeGraph":
-        """Deserialize from JSON."""
-        return cls.from_dict(json.loads(json_str))
+    def save(self, filepath: str):
+        """Save graph to JSON file."""
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, indent=2)
     
-    def visualize_to_html(self) -> str:
-        """Generate an HTML visualization of the graph."""
-        # Create a simple D3.js visualization
-        nodes_data = []
-        for node in self._nodes.values():
-            nodes_data.append({
-                "id": node.id,
-                "name": node.name[:30],
-                "type": node.node_type.value,
-                "group": list(NodeType).index(node.node_type)
-            })
-        
-        edges_data = []
-        for edge in self._edges:
-            edges_data.append({
-                "source": edge.source_id,
-                "target": edge.target_id,
-                "type": edge.edge_type.value,
-                "weight": edge.weight
-            })
-        
-        html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Knowledge Graph: {self.name}</title>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
-    <style>
-        body {{ margin: 0; font-family: Arial, sans-serif; background: #0a0a0f; }}
-        svg {{ width: 100vw; height: 100vh; }}
-        .node {{ cursor: pointer; }}
-        .node text {{ font-size: 10px; fill: #fff; }}
-        .link {{ stroke-opacity: 0.6; }}
-        .tooltip {{
-            position: absolute; padding: 8px 12px;
-            background: rgba(0,0,0,0.8); color: #fff;
-            border-radius: 4px; font-size: 12px;
-            pointer-events: none; opacity: 0;
-        }}
-        #legend {{
-            position: fixed; top: 20px; right: 20px;
-            background: rgba(0,0,0,0.8); padding: 15px;
-            border-radius: 8px; color: #fff;
-        }}
-    </style>
-</head>
-<body>
-    <div id="legend"></div>
-    <div class="tooltip"></div>
-    <svg></svg>
-    <script>
-        const nodes = {json.dumps(nodes_data)};
-        const links = {json.dumps(edges_data)};
-        
-        const colors = d3.scaleOrdinal(d3.schemeCategory10);
-        
-        const svg = d3.select("svg");
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        
-        const simulation = d3.forceSimulation(nodes)
-            .force("link", d3.forceLink(links).id(d => d.id).distance(80))
-            .force("charge", d3.forceManyBody().strength(-200))
-            .force("center", d3.forceCenter(width / 2, height / 2));
-        
-        const link = svg.append("g")
-            .selectAll("line")
-            .data(links)
-            .enter().append("line")
-            .attr("class", "link")
-            .attr("stroke", "#666")
-            .attr("stroke-width", d => Math.sqrt(d.weight));
-        
-        const node = svg.append("g")
-            .selectAll("g")
-            .data(nodes)
-            .enter().append("g")
-            .attr("class", "node")
-            .call(d3.drag()
-                .on("start", dragstarted)
-                .on("drag", dragged)
-                .on("end", dragended));
-        
-        node.append("circle")
-            .attr("r", 8)
-            .attr("fill", d => colors(d.group));
-        
-        node.append("text")
-            .attr("dx", 12)
-            .attr("dy", 4)
-            .text(d => d.name);
-        
-        simulation.on("tick", () => {{
-            link
-                .attr("x1", d => d.source.x)
-                .attr("y1", d => d.source.y)
-                .attr("x2", d => d.target.x)
-                .attr("y2", d => d.target.y);
-            node.attr("transform", d => `translate(${{d.x}},${{d.y}})`);
-        }});
-        
-        function dragstarted(event, d) {{
-            if (!event.active) simulation.alphaTarget(0.3).restart();
-            d.fx = d.x; d.fy = d.y;
-        }}
-        function dragged(event, d) {{ d.fx = event.x; d.fy = event.y; }}
-        function dragended(event, d) {{
-            if (!event.active) simulation.alphaTarget(0);
-            d.fx = null; d.fy = null;
-        }}
-        
-        // Legend
-        const types = [...new Set(nodes.map(n => n.type))];
-        const legend = d3.select("#legend");
-        legend.append("h4").text("Node Types").style("margin", "0 0 10px 0");
-        types.forEach((type, i) => {{
-            const item = legend.append("div").style("margin", "5px 0");
-            item.append("span")
-                .style("display", "inline-block")
-                .style("width", "12px")
-                .style("height", "12px")
-                .style("background", colors(i))
-                .style("margin-right", "8px")
-                .style("border-radius", "50%");
-            item.append("span").text(type);
-        }});
-    </script>
-</body>
-</html>
-"""
-        return html
+    @classmethod
+    def load(cls, filepath: str) -> "KnowledgeGraph":
+        """Load graph from JSON file."""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+    
+    def clear(self):
+        """Clear all nodes and edges."""
+        self._nodes.clear()
+        self._edges.clear()
+        self._index.clear()
+        self._content_index.clear()
+        if self.graph is not None:
+            self.graph.clear()
+        self.updated_at = datetime.now().isoformat()
 
 
-# Global knowledge graph instance
+# Global instance management
 _global_graph: Optional[KnowledgeGraph] = None
 
 
 def get_global_graph() -> KnowledgeGraph:
-    """Get the global knowledge graph instance."""
+    """Get or create the global knowledge graph instance."""
     global _global_graph
     if _global_graph is None:
-        _global_graph = KnowledgeGraph("global")
+        _global_graph = KnowledgeGraph(name="global")
     return _global_graph
 
 
@@ -680,3 +487,9 @@ def set_global_graph(graph: KnowledgeGraph):
     """Set the global knowledge graph instance."""
     global _global_graph
     _global_graph = graph
+
+
+def reset_global_graph():
+    """Reset the global knowledge graph."""
+    global _global_graph
+    _global_graph = None

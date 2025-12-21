@@ -8,20 +8,24 @@ This agent is responsible for:
 - Executing code and capturing outputs
 - Creating visualizations
 - Handling errors and debugging
+
+ENHANCED: Now includes pre-execution validation and LLM self-correction
 """
 
 import os
 import re
 import json
+import ast
 import asyncio
 import tempfile
 import shutil
 import base64
-from typing import Optional, Any, Dict, List, Tuple
+from typing import Optional, Any, Dict, List, Tuple, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 import subprocess
+import logging
 
 from core.gemini_client import AgentLLM, GeminiConfig, GeminiModel
 from core.knowledge_graph import (
@@ -34,6 +38,12 @@ from core.agent_prompts import (
     build_task_prompt
 )
 
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# DATA CLASSES
+# =============================================================================
 
 @dataclass
 class ExecutionResult:
@@ -71,20 +81,265 @@ class SandboxEnvironment:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
+# =============================================================================
+# CODE VALIDATOR (Integrated)
+# =============================================================================
+
+@dataclass
+class ValidationIssue:
+    """A validation issue found in code."""
+    level: str  # error, warning, info
+    category: str
+    message: str
+    line: Optional[int] = None
+    suggestion: str = ""
+
+
+@dataclass
+class ValidationResult:
+    """Result of code validation."""
+    is_valid: bool
+    issues: List[ValidationIssue] = field(default_factory=list)
+    fixed_code: Optional[str] = None
+    
+    @property
+    def errors(self) -> List[ValidationIssue]:
+        return [i for i in self.issues if i.level == 'error']
+
+
+class CodeValidator:
+    """Validates Python code before execution."""
+    
+    DANGEROUS_PATTERNS = [
+        (r'\beval\s*\(', 'eval() is dangerous'),
+        (r'\bexec\s*\(', 'exec() is dangerous'),
+        (r'\bos\.system\s*\(', 'os.system() can be dangerous'),
+        (r'\bsubprocess\.call\s*\([^)]*shell\s*=\s*True', 'shell=True is dangerous'),
+    ]
+    
+    STANDARD_IMPORTS = {
+        'os', 'sys', 're', 'json', 'math', 'random', 'time', 'datetime',
+        'collections', 'itertools', 'functools', 'typing', 'pathlib',
+        'dataclasses', 'enum', 'abc', 'copy', 'io', 'tempfile', 'shutil',
+        'logging', 'warnings', 'traceback', 'hashlib', 'base64'
+    }
+    
+    COMMON_PACKAGES = {
+        'numpy', 'pandas', 'matplotlib', 'torch', 'tensorflow', 'sklearn',
+        'scipy', 'requests', 'httpx', 'aiohttp', 'pydantic', 'fastapi'
+    }
+    
+    def __init__(self, available_packages: Optional[Set[str]] = None):
+        self.available_packages = available_packages or set()
+    
+    def validate(self, code: str, language: str = "python") -> ValidationResult:
+        """Validate code."""
+        if language not in ('python', 'py'):
+            return ValidationResult(is_valid=True, issues=[])
+        
+        issues = []
+        
+        # Syntax check
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            issues.append(ValidationIssue(
+                level='error',
+                category='syntax',
+                message=f"Syntax error: {e.msg}",
+                line=e.lineno,
+                suggestion=self._get_syntax_suggestion(e)
+            ))
+            return ValidationResult(is_valid=False, issues=issues)
+        
+        # Import check
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        module = alias.name.split('.')[0]
+                        if module not in self.STANDARD_IMPORTS and module not in self.available_packages:
+                            if module in self.COMMON_PACKAGES:
+                                issues.append(ValidationIssue(
+                                    level='warning',
+                                    category='import',
+                                    message=f"Package '{module}' may need to be installed",
+                                    line=node.lineno,
+                                    suggestion=f"pip install {module}"
+                                ))
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        module = node.module.split('.')[0]
+                        if module not in self.STANDARD_IMPORTS and module not in self.available_packages:
+                            if module in self.COMMON_PACKAGES:
+                                issues.append(ValidationIssue(
+                                    level='warning',
+                                    category='import',
+                                    message=f"Package '{module}' may need to be installed",
+                                    line=node.lineno
+                                ))
+        except:
+            pass
+        
+        # Security check
+        for pattern, message in self.DANGEROUS_PATTERNS:
+            if re.search(pattern, code):
+                issues.append(ValidationIssue(
+                    level='warning',
+                    category='security',
+                    message=message
+                ))
+        
+        is_valid = not any(i.level == 'error' for i in issues)
+        return ValidationResult(is_valid=is_valid, issues=issues)
+    
+    def _get_syntax_suggestion(self, error: SyntaxError) -> str:
+        msg = str(error.msg).lower()
+        if 'unexpected eof' in msg:
+            return "Check for missing closing brackets or quotes"
+        elif 'invalid syntax' in msg:
+            return "Check for typos or missing colons"
+        elif 'indent' in msg:
+            return "Fix indentation"
+        return "Review the syntax"
+
+
+class CodeFixer:
+    """Fixes code issues using quick fixes and LLM."""
+    
+    def __init__(self, llm_client=None):
+        self.llm_client = llm_client
+        self.validator = CodeValidator()
+    
+    def apply_quick_fixes(self, code: str, errors: List[ValidationIssue]) -> Tuple[str, List[str]]:
+        """Apply quick automatic fixes."""
+        fixes = []
+        fixed_code = code
+        
+        for error in errors:
+            if error.category == 'syntax':
+                msg = error.message.lower()
+                
+                # Missing colon
+                if 'expected ":"' in msg or "expected ':'" in msg:
+                    if error.line:
+                        lines = fixed_code.split('\n')
+                        if error.line <= len(lines):
+                            line = lines[error.line - 1]
+                            if not line.rstrip().endswith(':'):
+                                lines[error.line - 1] = line.rstrip() + ':'
+                                fixed_code = '\n'.join(lines)
+                                fixes.append(f"Added missing colon on line {error.line}")
+                
+                # Unmatched parenthesis
+                elif 'unexpected eof' in msg or 'never closed' in msg:
+                    open_parens = code.count('(') - code.count(')')
+                    if open_parens > 0:
+                        fixed_code = fixed_code.rstrip() + ')' * open_parens
+                        fixes.append(f"Added {open_parens} closing parenthesis")
+                    
+                    open_brackets = code.count('[') - code.count(']')
+                    if open_brackets > 0:
+                        fixed_code = fixed_code.rstrip() + ']' * open_brackets
+                        fixes.append(f"Added {open_brackets} closing brackets")
+                    
+                    open_braces = code.count('{') - code.count('}')
+                    if open_braces > 0:
+                        fixed_code = fixed_code.rstrip() + '}' * open_braces
+                        fixes.append(f"Added {open_braces} closing braces")
+        
+        return fixed_code, fixes
+    
+    async def fix_with_llm(self, code: str, errors: List[ValidationIssue], purpose: str = "") -> Optional[str]:
+        """Use LLM to fix code errors."""
+        if not self.llm_client:
+            return None
+        
+        error_desc = "\n".join([
+            f"- Line {e.line}: {e.message}" + (f" ({e.suggestion})" if e.suggestion else "")
+            for e in errors
+        ])
+        
+        prompt = f"""Fix the following Python code that has these errors:
+
+ERRORS:
+{error_desc}
+
+CODE:
+```python
+{code}
+```
+
+{f"PURPOSE: {purpose}" if purpose else ""}
+
+Fix ALL errors and return ONLY the corrected Python code, no explanations.
+"""
+        
+        try:
+            response = await self.llm_client.generate(
+                prompt,
+                system_instruction="You are an expert Python developer. Fix code errors precisely."
+            )
+            
+            # Extract code from response
+            content = response.content
+            match = re.search(r'```python\s*(.*?)\s*```', content, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+            
+            # Try without code block
+            content = re.sub(r'^```\w*\s*', '', content.strip())
+            content = re.sub(r'\s*```$', '', content)
+            return content
+            
+        except Exception as e:
+            logger.error(f"LLM fix failed: {e}")
+            return None
+    
+    async def fix_code(self, code: str, purpose: str = "", max_attempts: int = 3) -> Tuple[str, bool, List[str]]:
+        """Iteratively fix code."""
+        current_code = code
+        all_fixes = []
+        
+        for attempt in range(max_attempts):
+            result = self.validator.validate(current_code)
+            
+            if result.is_valid:
+                return current_code, True, all_fixes
+            
+            # Try quick fixes first
+            fixed, quick_fixes = self.apply_quick_fixes(current_code, result.errors)
+            if quick_fixes:
+                all_fixes.extend(quick_fixes)
+                current_code = fixed
+                continue
+            
+            # Try LLM fix
+            if self.llm_client:
+                llm_fixed = await self.fix_with_llm(current_code, result.errors, purpose)
+                if llm_fixed and llm_fixed != current_code:
+                    current_code = llm_fixed
+                    all_fixes.append("LLM-based fix applied")
+                    continue
+            
+            break
+        
+        final_result = self.validator.validate(current_code)
+        return current_code, final_result.is_valid, all_fixes
+
+
+# =============================================================================
+# CODING AGENT
+# =============================================================================
+
 class CodingAgent:
     """
     Agent for code generation and execution.
     
-    Capabilities:
-    - Create Docker sandbox environments
-    - Install project dependencies
-    - Generate test scripts based on paper concepts
-    - Execute code safely in sandbox
-    - Capture and display visualizations
-    - Debug and fix errors automatically
+    ENHANCED: Now includes pre-execution validation and LLM self-correction.
     """
     
-    # Docker images for different languages
     DOCKER_IMAGES = {
         "python": "python:3.11-slim",
         "javascript": "node:20-slim",
@@ -100,7 +355,6 @@ class CodingAgent:
     ):
         self.knowledge_graph = knowledge_graph or get_global_graph()
         
-        # Get specialized system prompt for this agent
         system_prompt = get_agent_prompt(AgentType.CODING)
         
         self.llm = AgentLLM(
@@ -111,7 +365,7 @@ class CodingAgent:
                 model=GeminiModel.FLASH,
                 temperature=0.4,
                 max_output_tokens=8192,
-                system_instruction=system_prompt  # Use specialized prompt
+                system_instruction=system_prompt
             )
         )
         self.use_docker = use_docker
@@ -119,22 +373,17 @@ class CodingAgent:
         self.generated_code: List[GeneratedCode] = []
         self.execution_history: List[ExecutionResult] = []
         self.work_dir = tempfile.mkdtemp(prefix="coding_agent_")
+        
+        # ENHANCED: Code validator and fixer
+        self.validator = CodeValidator()
+        self.fixer = CodeFixer(llm_client=self.llm)
     
     async def create_sandbox(
         self,
         language: str = "python",
         repo_path: Optional[str] = None
     ) -> SandboxEnvironment:
-        """
-        Create a sandbox environment for code execution.
-        
-        Args:
-            language: Programming language
-            repo_path: Optional path to repository to mount
-        
-        Returns:
-            SandboxEnvironment object
-        """
+        """Create a sandbox environment for code execution."""
         image = self.DOCKER_IMAGES.get(language, self.DOCKER_IMAGES["python"])
         env_id = f"{language}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
@@ -145,7 +394,6 @@ class CodingAgent:
         
         if self.use_docker:
             try:
-                # Check if Docker is available
                 check = await asyncio.create_subprocess_exec(
                     "docker", "info",
                     stdout=asyncio.subprocess.PIPE,
@@ -154,7 +402,6 @@ class CodingAgent:
                 await check.communicate()
                 
                 if check.returncode == 0:
-                    # Create Docker container
                     mounts = [f"-v{work_dir}:/workspace"]
                     if repo_path:
                         mounts.append(f"-v{repo_path}:/repo:ro")
@@ -165,7 +412,7 @@ class CodingAgent:
                         "-w", "/workspace",
                         *mounts,
                         image,
-                        "tail", "-f", "/dev/null"  # Keep container running
+                        "tail", "-f", "/dev/null"
                     ]
                     
                     process = await asyncio.create_subprocess_exec(
@@ -179,7 +426,7 @@ class CodingAgent:
                         container_id = stdout.decode().strip()
                 
             except Exception as e:
-                print(f"Docker not available: {e}")
+                logger.warning(f"Docker not available: {e}")
         
         env = SandboxEnvironment(
             container_id=container_id,
@@ -197,29 +444,17 @@ class CodingAgent:
         dependencies: List[str],
         language: str = "python"
     ) -> bool:
-        """
-        Install dependencies in the sandbox.
-        
-        Args:
-            env: Sandbox environment
-            dependencies: List of dependencies to install
-            language: Programming language
-        
-        Returns:
-            True if successful
-        """
+        """Install dependencies in the sandbox."""
         if not dependencies:
             return True
         
         if language == "python":
-            # Create requirements.txt
             req_content = "\n".join(dependencies)
             req_path = os.path.join(env.work_dir, "requirements.txt")
             
             with open(req_path, 'w', encoding='utf-8') as f:
                 f.write(req_content)
             
-            # Install in container or locally
             if env.container_id:
                 cmd = [
                     "docker", "exec", env.container_id,
@@ -230,36 +465,6 @@ class CodingAgent:
                     "pip", "install", "-r", req_path, "-q",
                     "--target", os.path.join(env.work_dir, "site-packages")
                 ]
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            
-            env.dependencies_installed = (process.returncode == 0)
-            return env.dependencies_installed
-        
-        elif language == "javascript":
-            # Create package.json
-            package = {
-                "name": "test-environment",
-                "version": "1.0.0",
-                "dependencies": {dep: "*" for dep in dependencies}
-            }
-            package_path = os.path.join(env.work_dir, "package.json")
-            
-            with open(package_path, 'w', encoding='utf-8') as f:
-                json.dump(package, f)
-            
-            if env.container_id:
-                cmd = [
-                    "docker", "exec", "-w", "/workspace",
-                    env.container_id, "npm", "install", "--silent"
-                ]
-            else:
-                cmd = ["npm", "install", "--silent", "--prefix", env.work_dir]
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -280,30 +485,11 @@ class CodingAgent:
         repo_info: Dict[str, Any],
         paper_summary: str
     ) -> List[GeneratedCode]:
-        """
-        Generate test scripts that verify paper concepts using the repository.
-        
-        Args:
-            concepts: Concepts from paper analysis
-            code_mappings: Mappings between concepts and code
-            repo_info: Repository information
-            paper_summary: Summary of the paper
-        
-        Returns:
-            List of generated code files
-        """
+        """Generate test scripts with validation and self-correction."""
         language = repo_info.get("main_language", "python")
         
-        # Prepare context for code generation
-        context = {
-            "concepts": concepts,
-            "mappings": code_mappings,
-            "entry_points": repo_info.get("entry_points", []),
-            "dependencies": repo_info.get("analysis", {}).get("main_components", [])
-        }
-        
         generation_prompt = f"""
-Generate a comprehensive test script that demonstrates and verifies the concepts from a scientific paper using the provided code repository.
+Generate a comprehensive test script that demonstrates and verifies the concepts from a scientific paper.
 
 Paper Summary:
 {paper_summary}
@@ -322,13 +508,11 @@ Generate a {language} test script that:
 1. Imports necessary modules from the repository
 2. Sets up test data or uses example data
 3. Demonstrates each key concept with working code
-4. Includes visualizations where appropriate (save to files)
+4. Includes visualizations where appropriate
 5. Prints clear output explaining what each test demonstrates
 6. Handles errors gracefully
 
-The script should be self-contained and ready to run.
-
-Also generate a separate visualization script that creates charts/plots to illustrate the paper's concepts.
+IMPORTANT: Ensure the code is syntactically correct and all imports are valid.
 
 Respond in JSON format:
 {{
@@ -343,16 +527,7 @@ Respond in JSON format:
         "content": "visualization script content",
         "purpose": "creates visual outputs",
         "dependencies": ["matplotlib", "etc"]
-    }},
-    "helper_files": [
-        {{
-            "filename": "helper.py",
-            "content": "helper code if needed",
-            "purpose": "utility functions"
-        }}
-    ],
-    "expected_outputs": ["list of expected output files"],
-    "run_instructions": "how to run the scripts"
+    }}
 }}
 """
         
@@ -360,12 +535,11 @@ Respond in JSON format:
             result = await self.llm.generate_structured(
                 generation_prompt,
                 schema={"type": "object"}
-                # System instruction already set in config - uses specialized CodingAgent prompt
             )
             
             generated = []
             
-            # Main test script
+            # Process main script
             if "main_script" in result:
                 script = result["main_script"]
                 code = GeneratedCode(
@@ -376,9 +550,12 @@ Respond in JSON format:
                     dependencies=script.get("dependencies", []),
                     is_test=True
                 )
+                
+                # ENHANCED: Validate and fix code
+                code = await self._validate_and_fix_code(code)
                 generated.append(code)
             
-            # Visualization script
+            # Process visualization script
             if "visualization_script" in result:
                 viz = result["visualization_script"]
                 code = GeneratedCode(
@@ -389,16 +566,9 @@ Respond in JSON format:
                     dependencies=viz.get("dependencies", []),
                     is_visualization=True
                 )
-                generated.append(code)
-            
-            # Helper files
-            for helper in result.get("helper_files", []):
-                code = GeneratedCode(
-                    filename=helper.get("filename", "helper.py"),
-                    language=language,
-                    content=helper.get("content", ""),
-                    purpose=helper.get("purpose", "")
-                )
+                
+                # ENHANCED: Validate and fix code
+                code = await self._validate_and_fix_code(code)
                 generated.append(code)
             
             self.generated_code.extend(generated)
@@ -420,8 +590,7 @@ Respond in JSON format:
             return generated
             
         except Exception as e:
-            print(f"Code generation failed: {e}")
-            # Generate a simple fallback script
+            logger.error(f"Code generation failed: {e}")
             fallback = GeneratedCode(
                 filename="test_basic.py",
                 language="python",
@@ -432,15 +601,12 @@ Generated as fallback due to: {str(e)}
 
 print("Testing paper concepts...")
 
-# Import repository (adjust path as needed)
 import sys
 sys.path.insert(0, '/repo')
 
-# Basic tests
 print("✓ Environment setup complete")
 print("✓ Repository accessible")
 
-# TODO: Add specific tests based on paper concepts
 # Concepts to test: {[c.get("name", "") for c in concepts]}
 
 print("\\nTest completed!")
@@ -452,24 +618,70 @@ print("\\nTest completed!")
             self.generated_code.append(fallback)
             return [fallback]
     
+    async def _validate_and_fix_code(self, code: GeneratedCode) -> GeneratedCode:
+        """ENHANCED: Validate and fix generated code."""
+        if code.language not in ('python', 'py'):
+            return code
+        
+        # Validate
+        result = self.validator.validate(code.content, code.language)
+        
+        if result.is_valid:
+            return code
+        
+        logger.info(f"Validating {code.filename}: {len(result.errors)} errors found")
+        
+        # Try to fix
+        fixed_content, is_valid, fixes = await self.fixer.fix_code(
+            code.content,
+            purpose=code.purpose,
+            max_attempts=3
+        )
+        
+        if fixes:
+            logger.info(f"Applied fixes to {code.filename}: {fixes}")
+            code.content = fixed_content
+            code.purpose += f" (auto-fixed: {', '.join(fixes)})"
+        
+        return code
+    
     async def execute_code(
         self,
         env: SandboxEnvironment,
         code: GeneratedCode,
         timeout: int = 300
     ) -> ExecutionResult:
-        """
-        Execute code in the sandbox environment.
-        
-        Args:
-            env: Sandbox environment
-            code: Code to execute
-            timeout: Timeout in seconds
-        
-        Returns:
-            ExecutionResult object
-        """
+        """ENHANCED: Execute code with pre-validation."""
         start_time = datetime.now()
+        
+        # ENHANCED: Pre-validate before execution
+        if code.language in ('python', 'py'):
+            validation = self.validator.validate(code.content)
+            
+            if not validation.is_valid:
+                # Try to fix
+                fixed_content, is_valid, fixes = await self.fixer.fix_code(
+                    code.content,
+                    purpose=code.purpose,
+                    max_attempts=2
+                )
+                
+                if not is_valid:
+                    error_details = "\n".join([
+                        f"Line {e.line}: {e.message}" 
+                        for e in validation.errors[:5]
+                    ])
+                    
+                    return ExecutionResult(
+                        success=False,
+                        stdout="",
+                        stderr=f"Code validation failed:\n{error_details}",
+                        return_code=-1,
+                        execution_time=0.0,
+                        error_analysis="Code has syntax errors that could not be auto-fixed"
+                    )
+                
+                code.content = fixed_content
         
         # Save code to file
         code_path = os.path.join(env.work_dir, code.filename)
@@ -479,22 +691,16 @@ print("\\nTest completed!")
         # Prepare execution command
         if code.language == "python":
             if env.container_id:
-                cmd = [
-                    "docker", "exec", "-w", "/workspace",
-                    env.container_id, "python", code.filename
-                ]
+                cmd = ["docker", "exec", "-w", "/workspace", env.container_id, "python", code.filename]
             else:
                 cmd = ["python", code_path]
         elif code.language == "javascript":
             if env.container_id:
-                cmd = [
-                    "docker", "exec", "-w", "/workspace",
-                    env.container_id, "node", code.filename
-                ]
+                cmd = ["docker", "exec", "-w", "/workspace", env.container_id, "node", code.filename]
             else:
                 cmd = ["node", code_path]
         else:
-            cmd = ["python", code_path]  # Default to Python
+            cmd = ["python", code_path]
         
         try:
             process = await asyncio.wait_for(
@@ -513,7 +719,7 @@ print("\\nTest completed!")
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
-            # Find output files (images, data files)
+            # Find output files
             output_files = []
             visualizations = []
             
@@ -521,7 +727,6 @@ print("\\nTest completed!")
                 item_path = os.path.join(env.work_dir, item)
                 if item.endswith(('.png', '.jpg', '.jpeg', '.svg', '.pdf')):
                     output_files.append(item)
-                    # Read and encode image for display
                     try:
                         with open(item_path, 'rb') as f:
                             img_data = base64.b64encode(f.read()).decode()
@@ -533,8 +738,6 @@ print("\\nTest completed!")
                         })
                     except:
                         pass
-                elif item.endswith(('.csv', '.json', '.txt')):
-                    output_files.append(item)
             
             result = ExecutionResult(
                 success=(process.returncode == 0),
@@ -546,201 +749,60 @@ print("\\nTest completed!")
                 visualizations=visualizations
             )
             
+            # Analyze errors if failed
+            if not result.success and result.stderr:
+                result.error_analysis = await self._analyze_error(
+                    code.content,
+                    result.stderr
+                )
+            
+            self.execution_history.append(result)
+            return result
+            
         except asyncio.TimeoutError:
-            result = ExecutionResult(
+            return ExecutionResult(
                 success=False,
                 stdout="",
                 stderr=f"Execution timed out after {timeout} seconds",
                 return_code=-1,
                 execution_time=timeout,
-                error_analysis="Timeout - code took too long to execute"
+                error_analysis="Code execution exceeded time limit"
             )
-        
         except Exception as e:
-            result = ExecutionResult(
+            return ExecutionResult(
                 success=False,
                 stdout="",
                 stderr=str(e),
                 return_code=-1,
                 execution_time=(datetime.now() - start_time).total_seconds(),
-                error_analysis=str(e)
+                error_analysis=f"Execution error: {e}"
             )
-        
-        # If failed, analyze error
-        if not result.success and not result.error_analysis:
-            result.error_analysis = await self._analyze_error(
-                code.content, result.stderr
-            )
-        
-        # Store in knowledge graph
-        await self.knowledge_graph.add_node(
-            node_type=NodeType.RESULT,
-            name=f"Execution: {code.filename}",
-            content=result.stdout[:2000] if result.success else result.stderr[:2000],
-            metadata={
-                "success": result.success,
-                "return_code": result.return_code,
-                "execution_time": result.execution_time,
-                "output_files": result.output_files
-            },
-            source="coding_agent"
-        )
-        
-        self.execution_history.append(result)
-        return result
     
     async def _analyze_error(self, code: str, error: str) -> str:
-        """Analyze an error and suggest fixes."""
+        """Analyze execution errors."""
         prompt = f"""
-Analyze this code error and provide a brief explanation with fix suggestion.
-
-Code (relevant parts):
-{code[:1500]}
+Analyze this Python error and suggest fixes:
 
 Error:
 {error[:1000]}
 
-Provide a brief analysis in 2-3 sentences.
+Code snippet (first 500 chars):
+{code[:500]}
+
+Provide a brief analysis of what went wrong and how to fix it.
 """
         
         try:
-            response = await self.llm.generate(
-                prompt,
-                system_instruction="You are a debugging expert. Be concise."
-            )
+            response = await self.llm.generate(prompt)
             return response.content
         except:
-            return "Error analysis failed"
-    
-    async def debug_and_fix(
-        self,
-        code: GeneratedCode,
-        error: ExecutionResult,
-        max_attempts: int = 3
-    ) -> Tuple[GeneratedCode, ExecutionResult]:
-        """
-        Attempt to fix code based on error.
-        
-        Args:
-            code: Original code
-            error: Error result
-            max_attempts: Maximum fix attempts
-        
-        Returns:
-            Tuple of (fixed code, execution result)
-        """
-        current_code = code
-        current_result = error
-        
-        for attempt in range(max_attempts):
-            if current_result.success:
-                break
-            
-            fix_prompt = f"""
-Fix this code based on the error message.
-
-Original code:
-```{code.language}
-{current_code.content}
-```
-
-Error:
-{current_result.stderr}
-
-Provide the complete fixed code. Only output the code, no explanations.
-"""
-            
-            try:
-                fixed_content = await self.llm.generate_code(
-                    fix_prompt,
-                    language=code.language
-                )
-                
-                fixed_code = GeneratedCode(
-                    filename=f"fixed_{attempt}_{code.filename}",
-                    language=code.language,
-                    content=fixed_content,
-                    purpose=f"Fixed version (attempt {attempt + 1})",
-                    dependencies=code.dependencies,
-                    is_test=code.is_test,
-                    is_visualization=code.is_visualization
-                )
-                
-                # Get or create environment
-                env = list(self.environments.values())[0] if self.environments else await self.create_sandbox(code.language)
-                
-                # Execute fixed code
-                current_result = await self.execute_code(env, fixed_code)
-                current_code = fixed_code
-                
-            except Exception as e:
-                print(f"Fix attempt {attempt + 1} failed: {e}")
-        
-        return current_code, current_result
-    
-    async def generate_visualization(
-        self,
-        data: Dict[str, Any],
-        viz_type: str = "auto",
-        title: str = "Visualization"
-    ) -> GeneratedCode:
-        """
-        Generate a visualization script.
-        
-        Args:
-            data: Data to visualize
-            viz_type: Type of visualization (auto, line, bar, scatter, etc.)
-            title: Visualization title
-        
-        Returns:
-            Generated visualization code
-        """
-        prompt = f"""
-Create a Python visualization script using matplotlib and/or plotly.
-
-Data to visualize:
-{json.dumps(data, indent=2)[:2000]}
-
-Visualization type: {viz_type}
-Title: {title}
-
-Requirements:
-1. Create a clear, professional visualization
-2. Save the figure to 'visualization.png'
-3. Include proper labels and legend
-4. Handle the data format appropriately
-5. Use a clean style
-
-Provide only the Python code.
-"""
-        
-        content = await self.llm.generate_code(prompt, language="python")
-        
-        viz_code = GeneratedCode(
-            filename="generate_viz.py",
-            language="python",
-            content=content,
-            purpose=f"Generate {viz_type} visualization: {title}",
-            dependencies=["matplotlib", "numpy"],
-            is_visualization=True
-        )
-        
-        self.generated_code.append(viz_code)
-        return viz_code
+            return "Error analysis unavailable"
     
     async def run_full_test_suite(
         self,
         env: SandboxEnvironment
     ) -> Dict[str, Any]:
-        """
-        Run all generated test scripts.
-        
-        Args:
-            env: Sandbox environment
-        
-        Returns:
-            Summary of all test results
-        """
+        """Run all generated test scripts."""
         results = {
             "total": 0,
             "passed": 0,
@@ -768,6 +830,84 @@ Provide only the Python code.
         
         return results
     
+    async def debug_and_fix(
+        self,
+        code: GeneratedCode,
+        result: ExecutionResult,
+        max_attempts: int = 3
+    ) -> Tuple[GeneratedCode, ExecutionResult]:
+        """
+        Debug and fix failed code execution.
+
+        Args:
+            code: The code that failed
+            result: The execution result with errors
+            max_attempts: Maximum fix attempts
+
+        Returns:
+            Tuple of (fixed_code, new_result)
+        """
+        logger.info(f"Attempting to debug and fix {code.filename}")
+
+        for attempt in range(max_attempts):
+            # Try to fix the code
+            fixed_content, is_valid, fixes = await self.fixer.fix_code(
+                code.content,
+                purpose=f"{code.purpose}\n\nError: {result.stderr[:500]}",
+                max_attempts=2
+            )
+
+            if not is_valid or fixed_content == code.content:
+                logger.warning(f"Fix attempt {attempt + 1} failed or made no changes")
+                continue
+
+            # Update code
+            code.content = fixed_content
+            code.purpose += f" (auto-fixed attempt {attempt + 1})"
+
+            # Re-execute
+            # Find the environment used previously
+            env = None
+            for e in self.environments.values():
+                env = e
+                break
+
+            if not env:
+                logger.error("No environment available for re-execution")
+                break
+
+            # Save and re-execute
+            result = await self.execute_code(env, code)
+
+            if result.success:
+                logger.info(f"Successfully fixed {code.filename} on attempt {attempt + 1}")
+                return code, result
+
+        logger.warning(f"Failed to fix {code.filename} after {max_attempts} attempts")
+        return code, result
+
+    def get_all_visualizations(self) -> List[Dict[str, Any]]:
+        """Get all visualizations from execution results."""
+        visualizations = []
+        for result in self.execution_history:
+            visualizations.extend(result.visualizations)
+        return visualizations
+
+    def get_execution_summary(self) -> Dict[str, Any]:
+        """Get summary of all executions."""
+        successful = sum(1 for r in self.execution_history if r.success)
+        failed = len(self.execution_history) - successful
+        total_time = sum(r.execution_time for r in self.execution_history)
+        viz_count = sum(len(r.visualizations) for r in self.execution_history)
+
+        return {
+            "total": len(self.execution_history),
+            "successful": successful,
+            "failed": failed,
+            "total_time": total_time,
+            "visualizations_generated": viz_count
+        }
+
     async def cleanup(self):
         """Clean up all environments and temporary files."""
         for env_id, env in self.environments.items():
@@ -781,35 +921,6 @@ Provide only the Python code.
                     await process.communicate()
                 except:
                     pass
-        
-        # Clean up work directory
-        try:
-            shutil.rmtree(self.work_dir)
-        except:
-            pass
-        
-        self.environments = {}
-        self.generated_code = []
-        self.execution_history = []
-    
-    def get_all_visualizations(self) -> List[Dict[str, Any]]:
-        """Get all generated visualizations."""
-        visualizations = []
-        for result in self.execution_history:
-            visualizations.extend(result.visualizations)
-        return visualizations
-    
-    def get_execution_summary(self) -> Dict[str, Any]:
-        """Get summary of all executions."""
-        return {
-            "total_executions": len(self.execution_history),
-            "successful": sum(1 for r in self.execution_history if r.success),
-            "failed": sum(1 for r in self.execution_history if not r.success),
-            "total_time": sum(r.execution_time for r in self.execution_history),
-            "visualizations_generated": sum(
-                len(r.visualizations) for r in self.execution_history
-            ),
-            "output_files": sum(
-                len(r.output_files) for r in self.execution_history
-            )
-        }
+
+        if os.path.exists(self.work_dir):
+            shutil.rmtree(self.work_dir, ignore_errors=True)

@@ -7,6 +7,8 @@ This agent is responsible for:
 - Identifying dependencies and requirements
 - Estimating compute resources needed
 - Mapping code to paper concepts via knowledge graph
+
+ENHANCED: Now includes multi-signal semantic mapping for improved accuracy
 """
 
 import os
@@ -20,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import subprocess
 from collections import defaultdict
+from difflib import SequenceMatcher
+import logging
 
 import httpx
 from github import Github
@@ -36,6 +40,8 @@ from core.agent_prompts import (
     MAPPING_ANALYSIS_PROMPT,
     build_task_prompt
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,7 +62,7 @@ class Dependency:
     """Represents a project dependency."""
     name: str
     version: Optional[str] = None
-    source: str = ""  # pip, npm, etc.
+    source: str = ""
     required: bool = True
     extras: List[str] = field(default_factory=list)
 
@@ -67,7 +73,7 @@ class AnalyzedRepository:
     name: str
     url: str
     description: str
-    languages: Dict[str, int]  # language -> line count
+    languages: Dict[str, int]
     files: List[CodeFile]
     dependencies: List[Dependency]
     entry_points: List[str]
@@ -83,52 +89,369 @@ class AnalyzedRepository:
         return max(self.languages, key=self.languages.get)
 
 
+# =============================================================================
+# ENHANCED SEMANTIC MAPPING (Integrated from semantic_mapper.py)
+# =============================================================================
+
+@dataclass
+class MappingEvidence:
+    """Evidence supporting a concept-to-code mapping."""
+    evidence_type: str
+    score: float
+    detail: str
+
+
+@dataclass
+class ConceptCodeMapping:
+    """A mapping between a paper concept and code element."""
+    concept_name: str
+    concept_type: str
+    concept_description: str
+    code_element: str
+    code_type: str
+    file_path: str
+    confidence: float
+    evidence: List[MappingEvidence] = field(default_factory=list)
+    reasoning: str = ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'concept_name': self.concept_name,
+            'concept_type': self.concept_type,
+            'concept_description': self.concept_description,
+            'code_element': self.code_element,
+            'code_type': self.code_type,
+            'file_path': self.file_path,
+            'confidence': self.confidence,
+            'evidence': [
+                {'type': e.evidence_type, 'score': e.score, 'detail': e.detail}
+                for e in self.evidence
+            ],
+            'reasoning': self.reasoning
+        }
+
+
+class LexicalMatcher:
+    """Match concepts to code using lexical similarity."""
+    
+    STOP_TERMS = {
+        'model', 'data', 'train', 'test', 'input', 'output', 'process',
+        'compute', 'calculate', 'get', 'set', 'init', 'run', 'execute',
+        'load', 'save', 'read', 'write', 'create', 'update', 'delete',
+        'main', 'helper', 'utils', 'util', 'base', 'config', 'params'
+    }
+    
+    def extract_terms(self, text: str) -> Set[str]:
+        """Extract meaningful terms from text."""
+        words = re.findall(r'[a-zA-Z][a-z]*|[A-Z]+(?=[A-Z][a-z]|\b)', text)
+        return {w.lower() for w in words if len(w) > 2 and w.lower() not in self.STOP_TERMS}
+    
+    def compute_similarity(self, concept: str, concept_desc: str, code_name: str, code_docs: str) -> Tuple[float, str]:
+        """Compute lexical similarity."""
+        concept_terms = self.extract_terms(concept + " " + concept_desc)
+        code_terms = self.extract_terms(code_name + " " + code_docs)
+        
+        if not concept_terms or not code_terms:
+            return 0.0, "No meaningful terms"
+        
+        overlap = concept_terms & code_terms
+        if not overlap:
+            return 0.0, "No term overlap"
+        
+        union = concept_terms | code_terms
+        similarity = len(overlap) / len(union)
+        
+        # Bonus for name match
+        concept_name_terms = self.extract_terms(concept)
+        code_name_terms = self.extract_terms(code_name)
+        if concept_name_terms & code_name_terms:
+            similarity = min(similarity + 0.2, 1.0)
+        
+        return similarity, f"Matching terms: {', '.join(sorted(overlap)[:5])}"
+    
+    def compute_name_similarity(self, concept: str, code_name: str) -> Tuple[float, str]:
+        """Compute direct name similarity."""
+        concept_normalized = concept.lower().replace(' ', '').replace('_', '').replace('-', '')
+        code_normalized = code_name.lower().replace('_', '').replace('-', '')
+        
+        if concept_normalized == code_normalized:
+            return 1.0, f"Exact name match: {concept} = {code_name}"
+        
+        if concept_normalized in code_normalized or code_normalized in concept_normalized:
+            return 0.7, f"Substring match: {concept} ≈ {code_name}"
+        
+        ratio = SequenceMatcher(None, concept_normalized, code_normalized).ratio()
+        if ratio > 0.6:
+            return ratio, f"Name similarity: {ratio:.2f}"
+        
+        # Abbreviation check
+        concept_abbrev = ''.join(w[0] for w in concept.split() if w)
+        if concept_abbrev.lower() == code_normalized[:len(concept_abbrev)].lower():
+            return 0.6, f"Abbreviation match: {concept_abbrev} → {code_name}"
+        
+        return 0.0, "No name similarity"
+
+
+class SemanticMatcher:
+    """Match concepts to code using semantic embeddings."""
+    
+    def __init__(self):
+        self.model = None
+        self._model_loaded = False
+    
+    def _ensure_model(self):
+        if self._model_loaded:
+            return self.model is not None
+        
+        self._model_loaded = True
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("Loaded sentence-transformers model")
+            return True
+        except ImportError:
+            logger.warning("sentence-transformers not installed. Semantic matching disabled.")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            return False
+    
+    def compute_similarity(self, concept: str, concept_desc: str, code_name: str, code_docs: str) -> Tuple[float, str]:
+        """Compute semantic similarity."""
+        if not self._ensure_model():
+            return 0.0, "Semantic model not available"
+        
+        try:
+            import numpy as np
+            
+            concept_text = f"{concept}: {concept_desc}"
+            code_text = f"{code_name}: {code_docs}"
+            
+            emb1 = self.model.encode(concept_text)
+            emb2 = self.model.encode(code_text)
+            
+            similarity = float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2)))
+            return max(similarity, 0.0), f"Semantic similarity: {similarity:.3f}"
+            
+        except Exception as e:
+            logger.error(f"Semantic similarity failed: {e}")
+            return 0.0, f"Error: {e}"
+
+
+class StructuralMatcher:
+    """Match concepts to code using AST patterns."""
+    
+    ALGORITHM_PATTERNS = {
+        'attention': {'softmax', 'dot_product', 'transpose', 'matmul'},
+        'normalization': {'mean', 'std', 'sqrt', 'eps'},
+        'convolution': {'kernel', 'stride', 'padding', 'conv'},
+        'transformer': {'attention', 'encoder', 'decoder', 'positional'},
+        'embedding': {'lookup', 'index', 'vocab', 'embed'},
+    }
+    
+    def extract_patterns(self, code: str) -> Set[str]:
+        """Extract patterns from code."""
+        patterns = set()
+        code_lower = code.lower()
+        
+        # Function calls and operations
+        patterns.update(re.findall(r'\b(\w+)\s*\(', code_lower))
+        patterns.update(re.findall(r'\.(\w+)\s*\(', code_lower))
+        
+        return patterns
+    
+    def match_pattern(self, concept: str, code: str) -> Tuple[float, str]:
+        """Match concept to code patterns."""
+        concept_lower = concept.lower()
+        code_patterns = self.extract_patterns(code)
+        
+        for pattern_name, required_ops in self.ALGORITHM_PATTERNS.items():
+            if pattern_name in concept_lower:
+                matches = sum(1 for op in required_ops if any(op in p for p in code_patterns))
+                if matches >= 2:
+                    return 0.7, f"Matches {pattern_name} pattern with {matches} indicators"
+                elif matches >= 1:
+                    return 0.4, f"Partial {pattern_name} pattern match"
+        
+        return 0.0, "No structural pattern match"
+
+
+class DocumentaryMatcher:
+    """Match concepts to code using docstrings."""
+    
+    def compute_similarity(self, concept: str, concept_desc: str, docstring: str) -> Tuple[float, str]:
+        """Compute similarity based on documentation."""
+        if not docstring:
+            return 0.0, "No documentation"
+        
+        doc_text = docstring.lower()
+        concept_terms = set(concept.lower().split()) | set(concept_desc.lower().split())
+        
+        stop_words = {'the', 'a', 'an', 'is', 'are', 'for', 'to', 'of', 'and', 'in', 'on', 'this', 'that'}
+        concept_terms = {t for t in concept_terms if t not in stop_words and len(t) > 2}
+        
+        if not concept_terms:
+            return 0.0, "No meaningful concept terms"
+        
+        matches = [t for t in concept_terms if t in doc_text]
+        
+        if not matches:
+            return 0.0, "No documentation mentions"
+        
+        score = len(matches) / len(concept_terms)
+        
+        if concept.lower() in doc_text:
+            score = min(score + 0.3, 1.0)
+            return score, f"Concept explicitly mentioned: '{concept}'"
+        
+        return score, f"Documentation mentions: {', '.join(matches[:3])}"
+
+
+class EnhancedSemanticMapper:
+    """Multi-signal concept-to-code mapper."""
+    
+    SIGNAL_WEIGHTS = {
+        'lexical': 0.20,
+        'semantic': 0.30,
+        'structural': 0.25,
+        'documentary': 0.25
+    }
+    
+    MIN_CONFIDENCE = 0.25
+    
+    def __init__(self, llm_client=None):
+        self.llm_client = llm_client
+        self.lexical = LexicalMatcher()
+        self.semantic = SemanticMatcher()
+        self.structural = StructuralMatcher()
+        self.documentary = DocumentaryMatcher()
+    
+    def map_single(self, concept: Dict, code_file: CodeFile, element_name: str, element_type: str) -> Optional[ConceptCodeMapping]:
+        """Map a single concept to a code element."""
+        concept_name = concept.get('name', '')
+        concept_desc = concept.get('description', '')
+        
+        # Get docstring
+        docstring = '\n'.join(code_file.docstrings) if code_file.docstrings else ''
+        
+        evidence = []
+        
+        # Lexical matching
+        lex_score, lex_detail = self.lexical.compute_similarity(
+            concept_name, concept_desc, element_name, docstring
+        )
+        name_score, name_detail = self.lexical.compute_name_similarity(concept_name, element_name)
+        lex_score = max(lex_score, name_score)
+        lex_detail = name_detail if name_score > lex_score else lex_detail
+        
+        if lex_score > 0:
+            evidence.append(MappingEvidence('lexical', lex_score, lex_detail))
+        
+        # Semantic matching
+        sem_score, sem_detail = self.semantic.compute_similarity(
+            concept_name, concept_desc, element_name, docstring
+        )
+        if sem_score > 0.3:
+            evidence.append(MappingEvidence('semantic', sem_score, sem_detail))
+        
+        # Structural matching
+        struct_score, struct_detail = self.structural.match_pattern(
+            concept_name, code_file.content
+        )
+        if struct_score > 0:
+            evidence.append(MappingEvidence('structural', struct_score, struct_detail))
+        
+        # Documentary matching
+        doc_score, doc_detail = self.documentary.compute_similarity(
+            concept_name, concept_desc, docstring
+        )
+        if doc_score > 0:
+            evidence.append(MappingEvidence('documentary', doc_score, doc_detail))
+        
+        # Compute weighted score
+        if not evidence:
+            return None
+        
+        total_score = 0.0
+        total_weight = 0.0
+        for e in evidence:
+            weight = self.SIGNAL_WEIGHTS.get(e.evidence_type, 0.1)
+            total_score += e.score * weight
+            total_weight += weight
+        
+        if total_weight > 0:
+            final_score = total_score / total_weight
+            if len(evidence) >= 3:
+                final_score = min(final_score * 1.2, 1.0)
+            elif len(evidence) >= 2:
+                final_score = min(final_score * 1.1, 1.0)
+        else:
+            return None
+        
+        if final_score < self.MIN_CONFIDENCE:
+            return None
+        
+        # Generate reasoning
+        evidence_strs = []
+        for e in sorted(evidence, key=lambda x: x.score, reverse=True):
+            evidence_strs.append(f"{e.evidence_type}: {e.detail}")
+        reasoning = f"Mapped based on: {'; '.join(evidence_strs[:3])}"
+        
+        return ConceptCodeMapping(
+            concept_name=concept_name,
+            concept_type=concept.get('type', 'concept'),
+            concept_description=concept_desc,
+            code_element=element_name,
+            code_type=element_type,
+            file_path=code_file.path,
+            confidence=final_score,
+            evidence=evidence,
+            reasoning=reasoning
+        )
+
+
+# =============================================================================
+# REPO ANALYZER AGENT
+# =============================================================================
+
 class RepoAnalyzerAgent:
     """
     Agent for analyzing GitHub repositories.
     
-    Capabilities:
-    - Clone repositories locally
-    - Analyze code structure and architecture
-    - Extract dependencies from various sources
-    - Identify entry points and main modules
-    - Estimate compute requirements
-    - Build knowledge graph from code
-    - Map code elements to paper concepts
+    ENHANCED: Now includes multi-signal semantic mapping for concept-to-code matching
     """
     
-    # File extensions to language mapping
-    LANGUAGE_MAP = {
-        ".py": "python",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".jsx": "javascript",
-        ".tsx": "typescript",
-        ".java": "java",
-        ".cpp": "cpp",
-        ".c": "c",
-        ".h": "c",
-        ".hpp": "cpp",
-        ".rs": "rust",
-        ".go": "go",
-        ".rb": "ruby",
-        ".php": "php",
-        ".swift": "swift",
-        ".kt": "kotlin",
-        ".scala": "scala",
-        ".r": "r",
-        ".R": "r",
-        ".jl": "julia",
-        ".m": "matlab",
-        ".sh": "shell",
-        ".bash": "shell",
+    LANGUAGE_EXTENSIONS = {
+        '.py': 'python',
+        '.js': 'javascript',
+        '.ts': 'typescript',
+        '.jsx': 'javascript',
+        '.tsx': 'typescript',
+        '.java': 'java',
+        '.cpp': 'cpp',
+        '.c': 'c',
+        '.h': 'c',
+        '.hpp': 'cpp',
+        '.rs': 'rust',
+        '.go': 'go',
+        '.rb': 'ruby',
+        '.r': 'r',
+        '.R': 'r',
+        '.jl': 'julia',
+        '.scala': 'scala',
+        '.kt': 'kotlin',
+        '.swift': 'swift',
+        '.m': 'matlab',
+        '.ipynb': 'jupyter'
     }
     
-    # Files to ignore
     IGNORE_PATTERNS = {
-        "__pycache__", "node_modules", ".git", ".venv", "venv",
-        "env", ".env", "dist", "build", ".idea", ".vscode",
-        "*.pyc", "*.pyo", "*.egg-info", ".eggs"
+        'node_modules', '__pycache__', '.git', '.svn', '.hg',
+        'venv', 'env', '.env', 'build', 'dist', 'target',
+        '.idea', '.vscode', '.vs', 'vendor', 'third_party',
+        'docs', 'doc', 'examples', 'tests', 'test', 'spec',
+        '.tox', '.pytest_cache', '.mypy_cache', 'coverage',
+        'htmlcov', '.coverage', '*.egg-info'
     }
     
     def __init__(
@@ -139,239 +462,154 @@ class RepoAnalyzerAgent:
     ):
         self.knowledge_graph = knowledge_graph or get_global_graph()
         
-        # Get specialized system prompt for this agent
         system_prompt = get_agent_prompt(AgentType.REPO_ANALYZER)
         
         self.llm = AgentLLM(
             agent_name="RepoAnalyzer",
-            agent_role="GitHub repository analysis and code understanding",
+            agent_role="Repository structure and code analysis",
             api_key=gemini_api_key,
             config=GeminiConfig(
                 model=GeminiModel.FLASH,
-                temperature=0.3,
+                temperature=0.4,
                 max_output_tokens=8192,
-                system_instruction=system_prompt  # Use specialized prompt
+                system_instruction=system_prompt
             )
         )
+        
+        self.github_token = github_token
         self.github = Github(github_token) if github_token else None
         self.analyzed_repos: Dict[str, AnalyzedRepository] = {}
-        self.temp_dirs: List[str] = []
+        
+        # ENHANCED: Semantic mapper
+        self.semantic_mapper = EnhancedSemanticMapper(llm_client=self.llm)
     
     async def analyze_repository(self, repo_url: str) -> AnalyzedRepository:
-        """
-        Analyze a GitHub repository.
+        """Analyze a GitHub repository."""
+        # Clone repository
+        repo_path = await self._clone_repository(repo_url)
         
-        Args:
-            repo_url: GitHub repository URL
+        # Extract basic info
+        repo_name = repo_url.split('/')[-1].replace('.git', '')
         
-        Returns:
-            AnalyzedRepository object
-        """
-        # Clone the repository
-        local_path = await self._clone_repository(repo_url)
-        
-        # Get repository metadata
-        metadata = await self._get_repo_metadata(repo_url)
-        
-        # Analyze the codebase
-        files = await self._analyze_files(local_path)
+        # Analyze files
+        files = await self._analyze_files(repo_path)
         
         # Extract dependencies
-        dependencies = await self._extract_dependencies(local_path)
+        dependencies = await self._extract_dependencies(repo_path)
         
         # Find entry points
-        entry_points = await self._find_entry_points(local_path, files)
+        entry_points = await self._find_entry_points(repo_path, files)
         
         # Read README
-        readme = await self._read_readme(local_path)
+        readme = await self._read_readme(repo_path)
         
-        # Calculate language statistics
+        # Calculate language stats
         languages = self._calculate_language_stats(files)
         
         # Build structure tree
-        structure = self._build_structure_tree(local_path)
+        structure = self._build_structure_tree(repo_path)
         
-        # Create analyzed repository object
+        # Create repository object
         repo = AnalyzedRepository(
-            name=metadata.get("name", Path(repo_url).stem),
+            name=repo_name,
             url=repo_url,
-            description=metadata.get("description", ""),
+            description=readme[:500] if readme else "",
             languages=languages,
             files=files,
             dependencies=dependencies,
             entry_points=entry_points,
             readme_content=readme,
             structure=structure,
-            metadata=metadata,
-            local_path=local_path
+            local_path=repo_path
         )
         
-        # Use LLM for deeper analysis
-        await self._enhance_with_llm(repo)
+        # LLM analysis
+        await self._analyze_with_llm(repo)
         
         # Build knowledge graph
         await self._build_knowledge_graph(repo)
         
-        # Store for later reference
         self.analyzed_repos[repo_url] = repo
         
         return repo
     
     async def _clone_repository(self, repo_url: str) -> str:
-        """Clone a repository to a temporary directory."""
-        # Create temp directory
+        """Clone a GitHub repository."""
         temp_dir = tempfile.mkdtemp(prefix="repo_")
-        self.temp_dirs.append(temp_dir)
         
-        # Clone the repository
+        clone_url = repo_url
+        if self.github_token and 'github.com' in repo_url:
+            clone_url = repo_url.replace('https://', f'https://{self.github_token}@')
+        
         try:
-            await asyncio.to_thread(
-                git.Repo.clone_from,
-                repo_url,
+            git.Repo.clone_from(
+                clone_url,
                 temp_dir,
-                depth=1  # Shallow clone for speed
+                depth=1,
+                single_branch=True
             )
         except Exception as e:
-            # Try with git command directly
-            process = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth", "1", repo_url, temp_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await process.communicate()
+            logger.warning(f"Git clone failed: {e}, trying without auth")
+            git.Repo.clone_from(repo_url, temp_dir, depth=1, single_branch=True)
         
         return temp_dir
     
-    async def _get_repo_metadata(self, repo_url: str) -> Dict[str, Any]:
-        """Get repository metadata from GitHub API."""
-        metadata = {}
-        
-        # Extract owner and repo name from URL
-        match = re.search(r'github\.com[/:]([^/]+)/([^/\.]+)', repo_url)
-        if match:
-            owner, repo_name = match.groups()
-            
-            try:
-                if self.github:
-                    repo = self.github.get_repo(f"{owner}/{repo_name}")
-                    metadata = {
-                        "name": repo.name,
-                        "full_name": repo.full_name,
-                        "description": repo.description,
-                        "stars": repo.stargazers_count,
-                        "forks": repo.forks_count,
-                        "language": repo.language,
-                        "topics": repo.get_topics(),
-                        "created_at": str(repo.created_at),
-                        "updated_at": str(repo.updated_at),
-                        "license": repo.license.name if repo.license else None,
-                        "default_branch": repo.default_branch
-                    }
-                else:
-                    # Use public API without token
-                    async with httpx.AsyncClient() as client:
-                        response = await client.get(
-                            f"https://api.github.com/repos/{owner}/{repo_name}"
-                        )
-                        if response.status_code == 200:
-                            data = response.json()
-                            metadata = {
-                                "name": data.get("name"),
-                                "full_name": data.get("full_name"),
-                                "description": data.get("description"),
-                                "stars": data.get("stargazers_count"),
-                                "forks": data.get("forks_count"),
-                                "language": data.get("language"),
-                                "topics": data.get("topics", []),
-                                "license": data.get("license", {}).get("name")
-                            }
-            except Exception as e:
-                metadata["error"] = str(e)
-        
-        return metadata
-    
-    async def _analyze_files(self, repo_path: str) -> List[CodeFile]:
-        """Analyze all code files in the repository."""
+    async def _analyze_files(self, repo_path: str, max_files: int = 200) -> List[CodeFile]:
+        """Analyze code files in the repository."""
         files = []
         
         for root, dirs, filenames in os.walk(repo_path):
-            # Skip ignored directories
-            dirs[:] = [d for d in dirs if not any(
-                d == p or (p.startswith("*") and d.endswith(p[1:]))
-                for p in self.IGNORE_PATTERNS
-            )]
+            # Filter directories
+            dirs[:] = [d for d in dirs if d not in self.IGNORE_PATTERNS and not d.startswith('.')]
             
             for filename in filenames:
+                if len(files) >= max_files:
+                    break
+                
+                ext = os.path.splitext(filename)[1]
+                if ext not in self.LANGUAGE_EXTENSIONS:
+                    continue
+                
                 file_path = os.path.join(root, filename)
-                relative_path = os.path.relpath(file_path, repo_path)
+                rel_path = os.path.relpath(file_path, repo_path)
                 
-                # Get file extension
-                ext = os.path.splitext(filename)[1].lower()
-                
-                if ext in self.LANGUAGE_MAP:
-                    language = self.LANGUAGE_MAP[ext]
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
                     
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                        
-                        # Parse the file
-                        code_file = await self._parse_code_file(
-                            relative_path, language, content
-                        )
-                        files.append(code_file)
+                    if len(content) > 100000:
+                        content = content[:100000]
                     
-                    except Exception as e:
-                        # Skip files that can't be read
-                        pass
+                    code_file = await self._analyze_single_file(
+                        rel_path,
+                        self.LANGUAGE_EXTENSIONS[ext],
+                        content
+                    )
+                    files.append(code_file)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to analyze {rel_path}: {e}")
         
         return files
     
-    async def _parse_code_file(
-        self,
-        path: str,
-        language: str,
-        content: str
-    ) -> CodeFile:
-        """Parse a code file to extract structure."""
+    async def _analyze_single_file(self, path: str, language: str, content: str) -> CodeFile:
+        """Analyze a single code file."""
         imports = []
         classes = []
         functions = []
         docstrings = []
         
         if language == "python":
-            # Extract Python imports
-            import_patterns = [
-                r'^import\s+([\w\.]+)',
-                r'^from\s+([\w\.]+)\s+import'
-            ]
-            for pattern in import_patterns:
-                imports.extend(re.findall(pattern, content, re.MULTILINE))
-            
-            # Extract class definitions
-            classes = re.findall(r'^class\s+(\w+)', content, re.MULTILINE)
-            
-            # Extract function definitions
-            functions = re.findall(r'^def\s+(\w+)', content, re.MULTILINE)
-            
-            # Extract docstrings
-            docstrings = re.findall(r'"""(.+?)"""', content, re.DOTALL)[:5]
-        
-        elif language in ("javascript", "typescript"):
-            # Extract JS/TS imports
-            imports = re.findall(
-                r"(?:import|require)\s*\(?['\"]([^'\"]+)['\"]",
-                content
-            )
-            
-            # Extract class definitions
+            imports = re.findall(r'^(?:from\s+(\S+)\s+)?import\s+(\S+)', content, re.MULTILINE)
+            imports = [f"{i[0]}.{i[1]}" if i[0] else i[1] for i in imports]
             classes = re.findall(r'class\s+(\w+)', content)
+            functions = re.findall(r'def\s+(\w+)', content)
+            docstrings = re.findall(r'"""(.*?)"""', content, re.DOTALL)[:5]
             
-            # Extract function definitions
-            functions = re.findall(
-                r'(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?\()',
-                content
-            )
+        elif language in ("javascript", "typescript"):
+            imports = re.findall(r"(?:import|require)\s*\(?['\"]([^'\"]+)['\"]", content)
+            classes = re.findall(r'class\s+(\w+)', content)
+            functions = re.findall(r'(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?\()', content)
             functions = [f[0] or f[1] for f in functions if f[0] or f[1]]
         
         return CodeFile(
@@ -386,7 +624,7 @@ class RepoAnalyzerAgent:
         )
     
     async def _extract_dependencies(self, repo_path: str) -> List[Dependency]:
-        """Extract dependencies from various package files."""
+        """Extract dependencies from package files."""
         dependencies = []
         
         # Python - requirements.txt
@@ -396,14 +634,11 @@ class RepoAnalyzerAgent:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith('#'):
-                        # Parse requirement line
                         match = re.match(r'^([a-zA-Z0-9_-]+)([<>=!]+)?(.+)?$', line)
                         if match:
-                            name = match.group(1)
-                            version = match.group(3) if match.group(2) else None
                             dependencies.append(Dependency(
-                                name=name,
-                                version=version,
+                                name=match.group(1),
+                                version=match.group(3) if match.group(2) else None,
                                 source="pip"
                             ))
         
@@ -412,121 +647,60 @@ class RepoAnalyzerAgent:
         if os.path.exists(setup_path):
             with open(setup_path, 'r') as f:
                 content = f.read()
-                # Extract install_requires
-                requires_match = re.search(
-                    r'install_requires\s*=\s*\[(.*?)\]',
-                    content,
-                    re.DOTALL
-                )
+                requires_match = re.search(r'install_requires\s*=\s*\[(.*?)\]', content, re.DOTALL)
                 if requires_match:
                     deps = re.findall(r'["\']([^"\']+)["\']', requires_match.group(1))
                     for dep in deps:
-                        name = re.match(r'^([a-zA-Z0-9_-]+)', dep)
-                        if name:
-                            dependencies.append(Dependency(
-                                name=name.group(1),
-                                source="pip"
-                            ))
+                        name = re.split(r'[<>=!]', dep)[0]
+                        if name not in [d.name for d in dependencies]:
+                            dependencies.append(Dependency(name=name, source="pip"))
         
-        # Python - pyproject.toml
-        pyproject_path = os.path.join(repo_path, "pyproject.toml")
-        if os.path.exists(pyproject_path):
-            with open(pyproject_path, 'r') as f:
-                content = f.read()
-                # Simple parsing for dependencies
-                deps_match = re.search(
-                    r'dependencies\s*=\s*\[(.*?)\]',
-                    content,
-                    re.DOTALL
-                )
-                if deps_match:
-                    deps = re.findall(r'["\']([^"\']+)["\']', deps_match.group(1))
-                    for dep in deps:
-                        name = re.match(r'^([a-zA-Z0-9_-]+)', dep)
-                        if name:
-                            dependencies.append(Dependency(
-                                name=name.group(1),
-                                source="pip"
-                            ))
-        
-        # JavaScript/TypeScript - package.json
-        package_path = os.path.join(repo_path, "package.json")
-        if os.path.exists(package_path):
-            with open(package_path, 'r') as f:
+        # JavaScript - package.json
+        pkg_path = os.path.join(repo_path, "package.json")
+        if os.path.exists(pkg_path):
+            with open(pkg_path, 'r') as f:
                 try:
-                    package = json.load(f)
-                    for dep_type in ["dependencies", "devDependencies"]:
-                        if dep_type in package:
-                            for name, version in package[dep_type].items():
-                                dependencies.append(Dependency(
-                                    name=name,
-                                    version=version,
-                                    source="npm",
-                                    required=(dep_type == "dependencies")
-                                ))
+                    pkg = json.load(f)
+                    for dep_type in ['dependencies', 'devDependencies']:
+                        for name, version in pkg.get(dep_type, {}).items():
+                            dependencies.append(Dependency(
+                                name=name,
+                                version=version,
+                                source="npm",
+                                required=(dep_type == 'dependencies')
+                            ))
                 except json.JSONDecodeError:
                     pass
         
-        # Remove duplicates
-        seen = set()
-        unique_deps = []
-        for dep in dependencies:
-            key = (dep.name, dep.source)
-            if key not in seen:
-                seen.add(key)
-                unique_deps.append(dep)
-        
-        return unique_deps
+        return dependencies
     
-    async def _find_entry_points(
-        self,
-        repo_path: str,
-        files: List[CodeFile]
-    ) -> List[str]:
-        """Find likely entry points in the codebase."""
+    async def _find_entry_points(self, repo_path: str, files: List[CodeFile]) -> List[str]:
+        """Find entry points in the repository."""
         entry_points = []
         
-        # Common entry point patterns
         entry_patterns = [
             "main.py", "app.py", "run.py", "train.py", "test.py",
             "index.py", "cli.py", "__main__.py",
-            "main.js", "index.js", "app.js", "server.js",
-            "main.ts", "index.ts", "app.ts"
+            "main.js", "index.js", "app.js", "server.js"
         ]
         
         for file in files:
             filename = os.path.basename(file.path)
             
-            # Check if it's a common entry point
             if filename in entry_patterns:
                 entry_points.append(file.path)
                 continue
             
-            # Check for if __name__ == "__main__" in Python files
-            if file.language == "python" and '__name__' in file.content:
-                if '__main__' in file.content:
-                    entry_points.append(file.path)
-        
-        # Check setup.py for console_scripts
-        setup_path = os.path.join(repo_path, "setup.py")
-        if os.path.exists(setup_path):
-            with open(setup_path, 'r') as f:
-                content = f.read()
-                scripts_match = re.search(r'console_scripts.*?\[(.*?)\]', content, re.DOTALL)
-                if scripts_match:
-                    scripts = re.findall(r'["\']([^"\'=]+)=', scripts_match.group(1))
-                    entry_points.extend(scripts)
+            if file.language == "python" and '__name__' in file.content and '__main__' in file.content:
+                entry_points.append(file.path)
         
         return list(set(entry_points))
     
     async def _read_readme(self, repo_path: str) -> str:
-        """Read the README file."""
-        readme_patterns = [
-            "README.md", "README.rst", "README.txt", "README",
-            "readme.md", "readme.rst", "readme.txt", "readme"
-        ]
+        """Read README file."""
+        patterns = ["README.md", "README.rst", "README.txt", "README", "readme.md"]
         
-        for pattern in readme_patterns:
+        for pattern in patterns:
             readme_path = os.path.join(repo_path, pattern)
             if os.path.exists(readme_path):
                 try:
@@ -534,54 +708,40 @@ class RepoAnalyzerAgent:
                         return f.read()
                 except:
                     pass
-        
         return ""
     
     def _calculate_language_stats(self, files: List[CodeFile]) -> Dict[str, int]:
         """Calculate lines of code per language."""
         stats = defaultdict(int)
-        
         for file in files:
-            line_count = len(file.content.split('\n'))
-            stats[file.language] += line_count
-        
+            stats[file.language] += len(file.content.split('\n'))
         return dict(stats)
     
-    def _build_structure_tree(self, repo_path: str) -> Dict[str, Any]:
-        """Build a tree representation of the repository structure."""
-        def build_tree(path: str, depth: int = 0) -> Dict[str, Any]:
-            if depth > 3:  # Limit depth
-                return {"type": "truncated"}
-            
-            result = {}
-            
-            try:
-                items = sorted(os.listdir(path))
-            except PermissionError:
-                return {"type": "permission_denied"}
-            
-            for item in items:
-                if item in self.IGNORE_PATTERNS or item.startswith('.'):
-                    continue
-                
-                item_path = os.path.join(path, item)
-                
-                if os.path.isdir(item_path):
-                    result[item] = build_tree(item_path, depth + 1)
-                else:
-                    ext = os.path.splitext(item)[1]
-                    result[item] = {
-                        "type": "file",
-                        "language": self.LANGUAGE_MAP.get(ext, "other")
-                    }
-            
-            return result
+    def _build_structure_tree(self, repo_path: str, depth: int = 0) -> Dict[str, Any]:
+        """Build structure tree."""
+        if depth > 3:
+            return {"type": "truncated"}
         
-        return build_tree(repo_path)
+        result = {}
+        try:
+            items = sorted(os.listdir(repo_path))
+        except:
+            return {"type": "error"}
+        
+        for item in items[:50]:
+            if item in self.IGNORE_PATTERNS or item.startswith('.'):
+                continue
+            
+            item_path = os.path.join(repo_path, item)
+            if os.path.isdir(item_path):
+                result[item] = self._build_structure_tree(item_path, depth + 1)
+            else:
+                result[item] = {"type": "file", "size": os.path.getsize(item_path)}
+        
+        return result
     
-    async def _enhance_with_llm(self, repo: AnalyzedRepository):
-        """Use LLM to enhance repository understanding."""
-        # Prepare analysis prompt
+    async def _analyze_with_llm(self, repo: AnalyzedRepository):
+        """Analyze repository with LLM."""
         file_summary = "\n".join([
             f"- {f.path}: {len(f.classes)} classes, {len(f.functions)} functions"
             for f in repo.files[:30]
@@ -596,9 +756,7 @@ class RepoAnalyzerAgent:
 Analyze this GitHub repository and provide insights.
 
 Repository: {repo.name}
-Description: {repo.description}
 Main Language: {repo.get_main_language()}
-Languages: {json.dumps(repo.languages)}
 
 Files Overview:
 {file_summary}
@@ -619,82 +777,43 @@ Provide analysis in JSON format:
         {{"name": "component", "type": "class/module/service", "purpose": "what it does", "file": "file path"}}
     ],
     "key_algorithms": ["list of algorithms implemented"],
-    "data_flow": "How data flows through the system",
     "compute_requirements": {{
         "cpu": "CPU requirements",
         "memory": "RAM estimate",
-        "gpu": "GPU requirements if any",
-        "storage": "Storage needs",
-        "estimated_runtime": "Rough runtime estimate"
+        "gpu": "GPU requirements if any"
     }},
-    "setup_complexity": "easy/medium/hard",
-    "documentation_quality": "poor/fair/good/excellent",
-    "test_coverage": "none/minimal/partial/comprehensive",
-    "potential_issues": ["list of potential issues"],
     "suggested_tests": ["test scenarios to verify functionality"]
 }}
 """
         
         try:
-            analysis = await self.llm.generate_structured(
-                analysis_prompt,
-                schema={"type": "object"}
-                # System instruction already set in config - uses specialized RepoAnalyzer prompt
-            )
-            
+            analysis = await self.llm.generate_structured(analysis_prompt, schema={"type": "object"})
             repo.metadata["llm_analysis"] = analysis
-            
         except Exception as e:
-            error_msg = str(e)
-            print(f"LLM repository analysis failed: {error_msg}")
-            
-            # Graceful degradation - provide basic analysis
-            repo.metadata["llm_analysis"] = {
-                "error": error_msg,
-                "fallback": True,
-                "purpose": repo.description or "Repository analysis unavailable",
-                "architecture": "unknown",
-                "main_components": [
-                    {"name": f.path, "type": "file", "purpose": "unknown"}
-                    for f in repo.files[:10] if f.classes or f.functions
-                ],
-                "key_algorithms": [],
-                "compute_requirements": {
-                    "cpu": "unknown",
-                    "memory": "unknown",
-                    "gpu": "check dependencies for torch/tensorflow",
-                    "storage": "unknown"
-                },
-                "setup_complexity": "unknown",
-                "documentation_quality": "check README",
-                "suggested_tests": ["Manual testing recommended"]
-            }
+            logger.error(f"LLM analysis failed: {e}")
+            repo.metadata["llm_analysis"] = {"error": str(e), "fallback": True}
     
     async def _build_knowledge_graph(self, repo: AnalyzedRepository):
-        """Build knowledge graph nodes and edges from repository."""
+        """Build knowledge graph from repository."""
         kg = self.knowledge_graph
         
-        # Add repository node
         repo_id = await kg.add_node(
             node_type=NodeType.REPOSITORY,
             name=repo.name,
             content=repo.description,
             metadata={
                 "url": repo.url,
-                "languages": repo.languages,
-                "stars": repo.metadata.get("stars", 0)
+                "language": repo.get_main_language(),
+                "file_count": len(repo.files)
             },
             source="repo_analyzer"
         )
         
-        # Add file nodes (limit to important files)
-        important_files = [f for f in repo.files if f.classes or f.functions][:50]
-        
-        for file in important_files:
+        for file in repo.files[:50]:
             file_id = await kg.add_node(
                 node_type=NodeType.FILE,
                 name=file.path,
-                content=file.content[:1000],
+                content=file.content[:2000],
                 metadata={
                     "language": file.language,
                     "size": file.size,
@@ -702,58 +821,34 @@ Provide analysis in JSON format:
                 },
                 source="repo_analyzer"
             )
+            await kg.add_edge(repo_id, file_id, EdgeType.CONTAINS, created_by="repo_analyzer")
             
-            await kg.add_edge(
-                repo_id, file_id,
-                EdgeType.CONTAINS,
-                created_by="repo_analyzer"
-            )
-            
-            # Add class nodes
-            for class_name in file.classes:
-                class_id = await kg.add_node(
+            for cls in file.classes[:10]:
+                cls_id = await kg.add_node(
                     node_type=NodeType.CLASS,
-                    name=class_name,
+                    name=cls,
                     metadata={"file": file.path},
                     source="repo_analyzer"
                 )
-                await kg.add_edge(
-                    file_id, class_id,
-                    EdgeType.CONTAINS,
-                    created_by="repo_analyzer"
-                )
+                await kg.add_edge(file_id, cls_id, EdgeType.CONTAINS, created_by="repo_analyzer")
             
-            # Add function nodes
-            for func_name in file.functions[:20]:  # Limit functions
+            for func in file.functions[:20]:
                 func_id = await kg.add_node(
                     node_type=NodeType.FUNCTION,
-                    name=func_name,
+                    name=func,
                     metadata={"file": file.path},
                     source="repo_analyzer"
                 )
-                await kg.add_edge(
-                    file_id, func_id,
-                    EdgeType.CONTAINS,
-                    created_by="repo_analyzer"
-                )
+                await kg.add_edge(file_id, func_id, EdgeType.CONTAINS, created_by="repo_analyzer")
         
-        # Add dependency nodes
-        for dep in repo.dependencies[:30]:  # Limit dependencies
+        for dep in repo.dependencies[:30]:
             dep_id = await kg.add_node(
                 node_type=NodeType.DEPENDENCY,
                 name=dep.name,
-                metadata={
-                    "version": dep.version,
-                    "source": dep.source,
-                    "required": dep.required
-                },
+                metadata={"version": dep.version, "source": dep.source},
                 source="repo_analyzer"
             )
-            await kg.add_edge(
-                repo_id, dep_id,
-                EdgeType.DEPENDS_ON,
-                created_by="repo_analyzer"
-            )
+            await kg.add_edge(repo_id, dep_id, EdgeType.DEPENDS_ON, created_by="repo_analyzer")
     
     async def map_concepts_to_code(
         self,
@@ -761,163 +856,67 @@ Provide analysis in JSON format:
         repo_url: str
     ) -> List[Dict[str, Any]]:
         """
-        Map paper concepts to code elements.
-        
-        Args:
-            concepts: List of concepts from paper analysis
-            repo_url: Repository URL
-        
-        Returns:
-            List of mappings between concepts and code
+        ENHANCED: Map paper concepts to code using multi-signal semantic matching.
         """
         if repo_url not in self.analyzed_repos:
             await self.analyze_repository(repo_url)
         
         repo = self.analyzed_repos[repo_url]
-        kg = self.knowledge_graph
+        all_mappings: List[ConceptCodeMapping] = []
         
-        mappings = []
-        
-        # Prepare code context for LLM
-        code_elements = []
-        for file in repo.files[:30]:
-            for cls in file.classes:
-                code_elements.append(f"Class: {cls} (in {file.path})")
-            for func in file.functions[:10]:
-                code_elements.append(f"Function: {func} (in {file.path})")
-        
-        # Ask LLM to map concepts to code
-        mapping_prompt = f"""
-Map the following scientific paper concepts to code elements in the repository.
-
-Concepts from paper:
-{json.dumps(concepts, indent=2)}
-
-Available code elements:
-{chr(10).join(code_elements)}
-
-For each concept, find the most relevant code element that implements it.
-
-Respond in JSON format:
-{{
-    "mappings": [
-        {{
-            "concept_name": "concept from paper",
-            "code_element": "matching code element",
-            "code_type": "class/function/module",
-            "file_path": "path to file",
-            "confidence": 0.0-1.0,
-            "reasoning": "why this mapping makes sense"
-        }}
-    ]
-}}
-"""
-        
-        try:
-            # Use the specialized concept mapper prompt
-            from core.agent_prompts import get_agent_prompt, AgentType
-            mapper_prompt = get_agent_prompt(AgentType.MAPPER)
+        for concept in concepts:
+            concept_mappings = []
             
-            result = await self.llm.generate_structured(
-                mapping_prompt,
-                schema={"type": "object"},
-                system_instruction=mapper_prompt  # Use ConceptMapper specialized prompt
-            )
-            
-            mappings = result.get("mappings", [])
-            
-            # Create edges in knowledge graph for mappings
-            for mapping in mappings:
-                concept_name = mapping.get("concept_name", "")
-                code_element = mapping.get("code_element", "")
-                
-                # Find concept node
-                concept_nodes = kg.search(concept_name, [NodeType.CONCEPT], limit=1)
-                
-                # Find code node
-                code_nodes = kg.search(
-                    code_element,
-                    [NodeType.CLASS, NodeType.FUNCTION, NodeType.MODULE],
-                    limit=1
-                )
-                
-                if concept_nodes and code_nodes:
-                    await kg.add_edge(
-                        concept_nodes[0][0].id,
-                        code_nodes[0][0].id,
-                        EdgeType.IMPLEMENTS,
-                        weight=mapping.get("confidence", 0.5),
-                        metadata={"reasoning": mapping.get("reasoning", "")},
-                        created_by="repo_analyzer"
+            for file in repo.files[:50]:
+                # Map to classes
+                for cls in file.classes:
+                    mapping = self.semantic_mapper.map_single(
+                        concept, file, cls, 'class'
                     )
+                    if mapping:
+                        concept_mappings.append(mapping)
+                
+                # Map to functions
+                for func in file.functions[:15]:
+                    mapping = self.semantic_mapper.map_single(
+                        concept, file, func, 'function'
+                    )
+                    if mapping:
+                        concept_mappings.append(mapping)
+            
+            # Sort by confidence and take top matches
+            concept_mappings.sort(key=lambda m: m.confidence, reverse=True)
+            all_mappings.extend(concept_mappings[:3])
         
-        except Exception as e:
-            mappings = [{"error": str(e)}]
+        # Sort all by confidence
+        all_mappings.sort(key=lambda m: m.confidence, reverse=True)
         
-        return mappings
-    
-    async def estimate_compute_requirements(
-        self,
-        repo_url: str
-    ) -> Dict[str, Any]:
-        """Estimate compute requirements for running the repository."""
-        if repo_url not in self.analyzed_repos:
-            await self.analyze_repository(repo_url)
+        # Store mappings in knowledge graph
+        kg = self.knowledge_graph
+        for mapping in all_mappings:
+            await kg.add_edge(
+                mapping.concept_name,
+                mapping.code_element,
+                EdgeType.IMPLEMENTS,
+                weight=mapping.confidence,
+                metadata={
+                    'evidence': [e.evidence_type for e in mapping.evidence],
+                    'reasoning': mapping.reasoning
+                },
+                created_by="repo_analyzer"
+            )
         
-        repo = self.analyzed_repos[repo_url]
-        analysis = repo.metadata.get("llm_analysis", {})
-        
-        # Base estimates
-        estimates = {
-            "cpu_cores": 2,
-            "memory_gb": 4,
-            "gpu_required": False,
-            "gpu_memory_gb": 0,
-            "storage_gb": 1,
-            "estimated_runtime_minutes": 10
-        }
-        
-        # Check for GPU-related dependencies
-        gpu_deps = {"torch", "tensorflow", "jax", "cupy", "cuda"}
-        for dep in repo.dependencies:
-            if any(g in dep.name.lower() for g in gpu_deps):
-                estimates["gpu_required"] = True
-                estimates["gpu_memory_gb"] = 8
-                estimates["memory_gb"] = 16
-                break
-        
-        # Check for data science dependencies
-        data_deps = {"pandas", "numpy", "scipy", "sklearn"}
-        if any(d.name.lower() in data_deps for d in repo.dependencies):
-            estimates["memory_gb"] = max(estimates["memory_gb"], 8)
-        
-        # Use LLM analysis if available
-        if "compute_requirements" in analysis:
-            llm_req = analysis["compute_requirements"]
-            if "gpu" in str(llm_req.get("gpu", "")).lower():
-                estimates["gpu_required"] = True
-        
-        return estimates
-    
-    def cleanup(self):
-        """Clean up temporary directories."""
-        for temp_dir in self.temp_dirs:
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-        self.temp_dirs = []
+        return [m.to_dict() for m in all_mappings]
     
     def get_repo_info(self, repo_url: str) -> Optional[Dict[str, Any]]:
-        """Get stored information about an analyzed repository."""
+        """Get repository info."""
         if repo_url in self.analyzed_repos:
             repo = self.analyzed_repos[repo_url]
             return {
                 "name": repo.name,
                 "url": repo.url,
-                "description": repo.description,
-                "languages": repo.languages,
                 "main_language": repo.get_main_language(),
+                "languages": repo.languages,
                 "file_count": len(repo.files),
                 "dependency_count": len(repo.dependencies),
                 "entry_points": repo.entry_points,
@@ -925,3 +924,15 @@ Respond in JSON format:
                 "local_path": repo.local_path
             }
         return None
+
+    def cleanup(self):
+        """Clean up any temporary resources."""
+        # Clean up temporary directories for cloned repos
+        for repo in self.analyzed_repos.values():
+            if repo.local_path and os.path.exists(repo.local_path):
+                try:
+                    import shutil
+                    shutil.rmtree(repo.local_path, ignore_errors=True)
+                    logger.info(f"Cleaned up repo: {repo.local_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup {repo.local_path}: {e}")

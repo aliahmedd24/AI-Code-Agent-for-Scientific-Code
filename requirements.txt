@@ -1,59 +1,88 @@
-# Core LLM and AI
-google-generativeai>=0.8.0
-google-ai-generativelanguage>=0.6.0
+# Scientific Agent System - Requirements
+# With HIGH-priority feature enhancements
 
-# Web Framework
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-python-multipart>=0.0.12
-websockets>=13.0
+# =============================================================================
+# CORE DEPENDENCIES
+# =============================================================================
 
-# Document Processing
-PyPDF2>=3.0.0
-pymupdf>=1.24.0
-arxiv>=2.1.0
-beautifulsoup4>=4.12.0
-lxml>=5.0.0
-html2text>=2024.2.0
-markdownify>=0.13.0
+# Google Gemini API
+google-genai>=1.0.0
 
-# GitHub and Git
-PyGithub>=2.4.0
-gitpython>=3.1.43
+# Graph operations
+networkx>=3.0
 
-# Knowledge Graph
-networkx>=3.4.0
-rdflib>=7.0.0
+# Web framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+websockets>=12.0
 
-# Data Processing
-pydantic>=2.9.0
-pandas>=2.2.0
-numpy>=1.26.0
+# HTTP client
+httpx>=0.25.0
 
-# Visualization
-matplotlib>=3.9.0
-plotly>=5.24.0
-seaborn>=0.13.0
+# GitHub integration
+PyGithub>=2.1.0
+gitpython>=3.1.0
 
-# Docker SDK
-docker>=7.1.0
+# Data validation
+pydantic>=2.0.0
 
-# HTTP and Async
-httpx>=0.27.0
-aiohttp>=3.10.0
-aiofiles>=24.1.0
-
-# Utilities
+# CLI tools
+rich>=13.0.0
 python-dotenv>=1.0.0
-rich>=13.9.0
-jinja2>=3.1.0
-pyyaml>=6.0.0
-tenacity>=9.0.0
 
-# Report Generation
-markdown>=3.7
-weasyprint>=62.0
+# Template engine
+Jinja2>=3.1.0
 
-# Testing
-pytest>=8.3.0
-pytest-asyncio>=0.24.0
+# Async utilities
+tenacity>=8.2.0
+
+# arXiv API
+arxiv>=2.0.0
+
+# HTML parsing
+beautifulsoup4>=4.12.0
+
+# =============================================================================
+# ENHANCED PDF PARSING (HIGH-PRIORITY)
+# =============================================================================
+
+# Primary PDF extraction
+PyMuPDF>=1.23.0
+
+# Alternative PDF backends
+pdfplumber>=0.10.0
+pypdf>=3.17.0
+
+# =============================================================================
+# SEMANTIC MAPPING (HIGH-PRIORITY)
+# =============================================================================
+
+# Embeddings for semantic similarity
+sentence-transformers>=2.2.0
+numpy>=1.24.0
+
+# =============================================================================
+# CODE VALIDATION (HIGH-PRIORITY) 
+# =============================================================================
+# Uses Python's built-in ast module - no additional deps
+
+# =============================================================================
+# TESTING (HIGH-PRIORITY)
+# =============================================================================
+
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# =============================================================================
+# VISUALIZATION (Optional)
+# =============================================================================
+
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# =============================================================================
+# DATA ANALYSIS (Optional)
+# =============================================================================
+
+pandas>=2.0.0
+scipy>=1.11.0
